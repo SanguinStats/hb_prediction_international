@@ -14,13 +14,14 @@ library(ggstance)
 ```
 
 ```{r}
-data_raw <- read.csv('20211026_summary.csv', stringsAsFactors = TRUE)
+data_raw <- read.csv('20211102_summary.csv', stringsAsFactors = TRUE)
 
 data_wide <- data_raw %>%
   select(Country, Id, Model, Pretty, Sex, 
          AUROC.value, AUROC.low, AUROC.high,
          AUPR.value, AUPR.low, AUPR.high,
-         F1.value, F1.low, F1.high)
+         F1.value, F1.low, F1.high) %>%
+  filter(Model %in% c('bl','rf','svm'))
 
 data <- data_wide %>%
   pivot_longer(AUROC.value:F1.high,
@@ -30,15 +31,20 @@ data <- data_wide %>%
   pivot_wider(names_from = estimate,
               values_from = value) %>%
   mutate(measure = as.factor(measure),
-         Model = Pretty)
+         Model = Pretty,
+         Group = as.character(interaction(Country,Sex))) %>%
+  arrange(Group) %>%
+  mutate(Group = as.factor(Group))
 
 
-data %>% ggplot(aes(x=value, xmin=low, xmax=high, y=interaction(Country,Sex))) +
-  facet_grid(rows = vars(Pretty), cols=vars(measure)) +
-  ggstance::geom_pointrangeh(aes(colour=Sex, shape=Model)) +
-  ylab('Dataset (country and sex)') +
-  theme_bw() +
-  theme(legend.position='bottom')
+data %>% 
+  ggplot(aes(x=value, xmin=low, xmax=high, y=Group)) +
+    facet_grid(rows = vars(Pretty), cols=vars(measure)) +
+    ggstance::geom_pointrangeh(aes(colour=Sex, shape=Country)) +
+    scale_y_discrete(limits=rev) +
+    ylab('Dataset (country and sex)') +
+    theme_bw() +
+    theme(legend.position='bottom')
 
 ```
 
