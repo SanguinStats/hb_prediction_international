@@ -1,0 +1,124 @@
+---
+title: "Time periods"
+author: "Jarkko Toivonen"
+date: "11/4/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+library(plotly)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R M
+
+```{r}
+df_orig <- readRDS("~/proj/interval_prediction/data/preprocessed-26-10-2021.rds")
+```
+
+```{r Histogram of all donations}
+df_orig %>% ggplot(aes(x=dateonly)) + geom_histogram()
+```
+
+```{r Drop too short time-series}
+donation_cutoff <- 7
+if (FALSE) {   # Let's not do this yet
+  df <- df_orig
+  old_count <- nrow(df); old_count2 <- n_distinct(df$donor)
+  df <- df %>% 
+    group_by(donor) %>%
+    filter(n() >= donation_cutoff) %>%
+    ungroup()
+  sprintf("Dropped %i / %i donations (%i / %i donors) due to dropping too short time-series\n", 
+          old_count - nrow(df), old_count, old_count2 - n_distinct(df$donor), old_count2)
+} else {
+  df <- df_orig
+}
+```
+
+## Number of donors whose donation career fully fits in each time window [first,last]
+
+```{r}
+df2 <- df %>% 
+  group_by(donor) %>%
+  summarise(min=min(dateonly), max=max(dateonly)) %>%
+  mutate(min_year=year(min), max_year=year(max))
+```
+
+```{r}
+f <- function(df, first, last) {
+  n <- df %>% filter(first <= min_year, max_year <= last) %>% nrow()
+  return(n)
+}
+```
+
+```{r}
+res <- expand.grid(first=1999:2020, last=1999:2020) %>% 
+  as_tibble() %>%
+  filter(first <= last) %>%
+  rowwise() %>%
+  mutate(count = f(df2, first=first, last=last)) %>% 
+  ungroup()
+```
+
+```{r}
+g <- res %>%
+  #mutate(count = cut(count, breaks=seq(0, 100000, by=10000))) %>%
+  ggplot(aes(x=first, y=last, fill=count)) +
+  geom_raster() +
+  #scale_fill_binned(type="viridis")
+  scale_fill_steps(breaks = seq(0, 100000, by=20000))
+if (TRUE || isTRUE(getOption('knitr.in.progress'))) {
+  g 
+} else {
+  ggplotly(g)
+}
+```
+
+## Number of donors who have had donation(s) in year 2020
+
+```{r}
+df3 <- df %>%
+  filter(dateonly <= "2020-12-31") %>%        # Just in case
+  group_by(donor) %>%
+  filter(year(max(dateonly)) == 2020) %>%     # Has a donation in the year 20202
+  ungroup()
+```
+
+
+```{r}
+years <- 2010:2020
+#years <- setNames(years, years)
+# Number of donors who have at least 'donation_cutoff' donations starting from year 'y'
+helper <- function(y, s) {
+  #cat(sprintf("Year: %i, sex: %s\n", y, s))
+  tmp <- 
+    df3 %>% 
+    filter(year(dateonly) >= y, sex==s) %>%
+    group_by(donor) %>%
+    filter(n() >= donation_cutoff) %>%
+    ungroup()
+  #cat(sprintf("nrow: %i\n", nrow(tmp)))
+  return(n_distinct(tmp$donor))
+}
+male_counts <- map_dbl(years, helper, "male")
+female_counts <- map_dbl(years, helper, "female")
+counts <- tibble(year=years, male=male_counts, female=female_counts)
+counts
+```
+
+```{r}
+counts %>% pivot_longer(cols=c("male", "female"), names_to = "sex") %>%
+  ggplot(aes(x = year, y=value, fill=sex)) +
+  geom_col(position="dodge") +
+  labs(x="Start year", y=sprintf("Number of donors with at least %i donations", donation_cutoff))
+```
+
+
+
+
+
