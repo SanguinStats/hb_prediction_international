@@ -1,3 +1,6 @@
+library(kernlab)
+library(caret)
+
 # Caret's predict method only allows type to be "prob" or "raw.
 # We will dig out the ksvm fit object from Caret's fit object and
 # call its predict method directly.

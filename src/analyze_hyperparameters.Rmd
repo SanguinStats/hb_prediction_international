@@ -7,20 +7,23 @@ output: pdf_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(knitr)
 ```
 
 ## Hyperparameters
 
-```{r}
-library(tidyverse)
-```
 
 ```{r}
-svm_base <- "/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-01-09-svm-hyper"
+base <- "/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-01-29-svm-rf-10k-hyper/tmp"
+svm_base <- rf_base <- base
+#svm_base <- "/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-01-09-svm-hyper"
+#rf_base <- "/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2021-12-18-rf-hyper"
+
 svm_male_hyper <- readRDS(sprintf("%s/svm-hyper-fit-male.rds", svm_base))
 svm_female_hyper <- readRDS(sprintf("%s/svm-hyper-fit-female.rds", svm_base))
 
-rf_base <- "/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2021-12-18-rf-hyper"
 rf_male_hyper <- readRDS(sprintf("%s/rf-hyper-fit-male.rds", rf_base))
 rf_female_hyper <- readRDS(sprintf("%s/rf-hyper-fit-female.rds", rf_base))
 
@@ -50,13 +53,15 @@ df_svm_male %>% ggplot(aes(x=C, y=ROC, color=as.factor(sigma))) +
   geom_point() + 
   scale_x_log10(breaks=svm_breaks) + 
   labs(title="Male", color="Sigma") + 
-  geom_point(mapping=aes(x=C, ROC), data=best_svm_male, color="black", fill=NA, size=5, shape=1)
+  geom_point(mapping=aes(x=C, ROC), data=best_svm_male, 
+             color="black", fill=NA, size=5, shape=1)
 df_svm_female %>% ggplot(aes(x=C, y=ROC, color=as.factor(sigma))) + 
   geom_line() + 
   geom_point() + 
   scale_x_log10(breaks=svm_breaks) + 
   labs(title="Female", color="Sigma") +
-  geom_point(mapping=aes(x=C, ROC), data=best_svm_female, color="black", fill=NA, size=5, shape=1)
+  geom_point(mapping=aes(x=C, ROC), data=best_svm_female, 
+             color="black", fill=NA, size=5, shape=1)
 ```
 
 ## Random forest
@@ -79,11 +84,33 @@ df_rf_male %>% ggplot(aes(x=nodesize, y=ROC, color=as.factor(mtry))) +
   geom_point() + 
   #scale_x_log10()+#breaks=rf_breaks) + 
   labs(title="Male", x=nodesize_label, color=mtry_label) + 
-  geom_point(mapping=aes(x=nodesize, ROC), data=best_rf_male, color="black", fill=NA, size=5, shape=1)
+  geom_point(mapping=aes(x=nodesize, ROC), data=best_rf_male, color="black", 
+             fill=NA, size=5, shape=1)
 df_rf_female %>% ggplot(aes(x=nodesize, y=ROC, color=as.factor(mtry))) + 
   geom_line() + 
   geom_point() + 
   #scale_x_log10(breaks=rf_breaks) + 
   labs(title="Female", x=nodesize_label, color=mtry_label) +
-  geom_point(mapping=aes(x=nodesize, ROC), data=best_rf_female, color="black", fill=NA, size=5, shape=1)
+  geom_point(mapping=aes(x=nodesize, ROC), data=best_rf_female, 
+             color="black", fill=NA, size=5, shape=1)
 ```
+
+## Optimal hyperparameters
+
+### Random forest
+
+```{r}
+kable(bind_rows(male=best_rf_male, female=best_rf_female, .id="sex") %>% 
+        select(-c("ROCSD", "SensSD", SpecSD)), 
+      digits=3)
+```
+
+### Support vector machine
+
+```{r}
+kable(bind_rows(male=best_svm_male, female=best_svm_female, .id="sex") %>% 
+        select(-c("ROCSD", "SensSD", SpecSD)), 
+      digits=3)
+```
+
+
