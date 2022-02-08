@@ -17,7 +17,11 @@ library(knitr)
 
 ```{r}
 base <- "/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-01-29-svm-rf-10k-hyper/tmp"
-svm_base <- rf_base <- base
+svm_base <- base
+rf_base <- "/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-02-04-ranger-hyper"
+#rf_base <- "/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-02-04-rf-hyper"
+
+#rf_base <- "/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-01-31-rf-hyper-new"
 #svm_base <- "/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-01-09-svm-hyper"
 #rf_base <- "/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2021-12-18-rf-hyper"
 
@@ -26,7 +30,7 @@ svm_female_hyper <- readRDS(sprintf("%s/svm-hyper-fit-female.rds", svm_base))
 
 rf_male_hyper <- readRDS(sprintf("%s/rf-hyper-fit-male.rds", rf_base))
 rf_female_hyper <- readRDS(sprintf("%s/rf-hyper-fit-female.rds", rf_base))
-
+rf_model <- class(rf_male_hyper$finalModel)
 ```
 
 ```{r}
@@ -75,24 +79,33 @@ rf_female_hyper
 df_rf_male <- as_tibble(rf_male_hyper$results)
 df_rf_female <- as_tibble(rf_female_hyper$results)
 mtry_label <- get_label(rf_male_hyper, "mtry")
-nodesize_label <- get_label(rf_male_hyper, "nodesize")
+nodesize_var <- if (rf_model == "ranger") "min.node.size" else "nodesize"
+nodesize_label <- get_label(rf_male_hyper, nodesize_var)
 #rf_breaks <- unique(df_rf_male$C)
 best_rf_male <- df_rf_male %>% inner_join(as_tibble(rf_male_hyper$bestTune))
 best_rf_female <- df_rf_female %>% inner_join(as_tibble(rf_female_hyper$bestTune))
-df_rf_male %>% ggplot(aes(x=nodesize, y=ROC, color=as.factor(mtry))) + 
+gm <- df_rf_male %>% ggplot(aes(x=get(nodesize_var), y=ROC, color=as.factor(mtry))) + 
   geom_line() + 
   geom_point() + 
   #scale_x_log10()+#breaks=rf_breaks) + 
   labs(title="Male", x=nodesize_label, color=mtry_label) + 
-  geom_point(mapping=aes(x=nodesize, ROC), data=best_rf_male, color="black", 
-             fill=NA, size=5, shape=1)
-df_rf_female %>% ggplot(aes(x=nodesize, y=ROC, color=as.factor(mtry))) + 
+  geom_point(mapping=aes(x=get(nodesize_var), ROC), data=best_rf_male, color="black", 
+             fill=NA, size=5, shape=1) +
+  theme(legend.position="bottom")
+if (rf_model=="ranger")
+  gm <- gm + facet_wrap(~splitrule)
+gm
+gf <- df_rf_female %>% ggplot(aes(x=get(nodesize_var), y=ROC, color=as.factor(mtry))) + 
   geom_line() + 
   geom_point() + 
   #scale_x_log10(breaks=rf_breaks) + 
   labs(title="Female", x=nodesize_label, color=mtry_label) +
-  geom_point(mapping=aes(x=nodesize, ROC), data=best_rf_female, 
-             color="black", fill=NA, size=5, shape=1)
+  geom_point(mapping=aes(x=get(nodesize_var), ROC), data=best_rf_female, 
+             color="black", fill=NA, size=5, shape=1) +
+  theme(legend.position="bottom")
+if (rf_model=="ranger")
+  gf <- gf + facet_wrap(~splitrule)
+gf
 ```
 
 ## Optimal hyperparameters
