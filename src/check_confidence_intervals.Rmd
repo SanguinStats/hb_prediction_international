@@ -26,7 +26,7 @@ seeds <- tibble::tribble(
 ```
 
 
-```{r cars}
+```{r Results from 10k sample}
 old_filename <- "/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-02-09-all-10k/summary.csv"    # seed 123
 new_filename <- "/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-03-31-all-final/summary.csv"  # seed 123
 new2_filename <- "/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-03-31-all-final2/summary.csv"  # seed 6532
@@ -35,14 +35,21 @@ new <- read_csv(new_filename)
 new2 <- read_csv(new2_filename)
 ```
 
+```{r Results from full data}
+tmp1 <- read_csv("/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-02-11-rf-svm-bl-full/summary.csv")
+tmp2 <- read_csv("/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-02-14-lmm-full/summary.csv")
+old_full <- bind_rows(tmp1, tmp2)
+new_full <- read_csv("/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-04-01-all-full-final/summary.csv")
+```
 
 ```{r}
-myplot <- function(old, new) {
-  df <- bind_rows(initial=old, final=new, .id="id")
+myplot <- function(old, new, label1="initial", label2="final") {
+  df <- bind_rows({{label1}}:=old, {{label2}}:=new, .id="id") %>%
+    mutate(id=factor(id, levels=c(label2, label1)))
   df %>% ggplot(aes(x=`AUROC value`, xmin=`AUROC low`,  xmax=`AUROC high`, y=Pretty, color=id)) +
     geom_pointrange(position = position_dodge(0.5), key_glyph=ggstance::draw_key_pointrangeh) + 
     facet_grid(~Sex) + 
-    scale_color_manual(values=c("brown", "green"), breaks=c("initial", "final")) +
+    scale_color_manual(values=c("brown", "green"), breaks=c(label1, label2)) +
     labs(y="Model", color="Mode")
 }
 ```
@@ -56,5 +63,18 @@ Try with another seed.
 ```{r}
 # To save time, I didn't compute the linear models for this seed.
 myplot(old, new2) + labs(title="Seeds initial = 123, final = 6532")
+```
+
+Compare final result for two seeds.
+
+```{r}
+myplot(new, new2, "final1", "final2") + labs(title="Final seed1 = 123, final seed2 = 6532")
+```
+
+
+Results from full data.
+
+```{r}
+myplot(old_full, new_full)
 ```
 
