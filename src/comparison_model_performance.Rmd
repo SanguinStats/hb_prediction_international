@@ -1,0 +1,177 @@
+---
+title: "Comparison of model performance"
+author: "Marieke Vinkenoog"
+date: "26/10/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(ggstance)
+```
+
+```{r}
+load_summary_data <- function(file) {
+  data_raw <- read.csv(file, stringsAsFactors = TRUE)
+  colnames(data_raw)[1] <- 'Country'
+  data_wide <- data_raw %>%
+    select(Country, Id, Model, Pretty, Sex, 
+           AUROC.value, AUROC.low, AUROC.high,
+           AUPR.value, AUPR.low, AUPR.high,
+           F1.value, F1.low, F1.high)
+  
+  data <- data_wide %>%
+    pivot_longer(AUROC.value:F1.high,
+                 names_to = c('measure', 'estimate'),
+                 names_sep = '\\.',
+                 values_to = 'value') %>%
+    pivot_wider(names_from = estimate,
+                values_from = value) %>%
+    mutate(measure = as.factor(measure),
+           Model = Pretty,
+           Group = as.character(interaction(Country,Sex))) %>%
+    arrange(Group) %>%
+    mutate(Group = as.factor(Group)) %>%
+    group_by(Group, measure) %>%
+    mutate(value_rel = value - value[Model == 'Baseline'],
+           low_rel = low - low[Model == 'Baseline'],
+           high_rel = high - high[Model == 'Baseline']) %>%
+    ungroup()
+  
+  return(data)
+}
+
+data <- load_summary_data('20220301_summary_all-10k.csv')
+
+data %>% 
+  ggplot(aes(x=value, xmin=low, xmax=high, y=Group)) +
+    facet_grid(rows = vars(Pretty), cols=vars(measure)) +
+    ggstance::geom_pointrangeh(aes(colour=Sex, shape=Country)) +
+    scale_y_discrete(limits=rev) +
+    ylab('Dataset (country and sex)') +
+    theme_bw() +
+    theme(legend.position='bottom')
+
+```
+
+# Baseline scores
+```{r}
+data %>% 
+  filter(Model == 'Baseline') %>%
+  ggplot(aes(x=value, xmin=low, xmax=high, y=Group)) +
+    facet_grid(cols=vars(measure)) +
+    ggstance::geom_pointrangeh(aes(colour=Sex, shape=Country)) +
+    scale_y_discrete(limits=rev) +
+    ylab('Dataset (country and sex)') +
+    theme_bw() +
+    theme(legend.position='bottom')
+```
+
+
+# Model scores relative to baseline
+
+
+```{r}
+data %>% 
+  filter(Model != 'Baseline') %>%
+  ggplot(aes(x=value_rel, xmin=low_rel, xmax=high_rel, y=Group)) +
+    facet_grid(rows=vars(Pretty), cols=vars(measure)) +
+    ggstance::geom_pointrangeh(aes(colour=Sex, shape=Country)) +
+    scale_y_discrete(limits=rev) +
+    ylab('Dataset (country and sex)') +
+    geom_vline(xintercept=0) +
+    theme_bw() +
+    theme(legend.position='bottom')
+  
+```
+
+
+# Comparing model performance in 10k sample and fulldata
+
+```{r}
+data_10k <- load_summary_data('20220301_summary_all-10k.csv') %>%
+  mutate(Size = '10k')
+data_full <- load_summary_data('20220301_summary_all-fulldata.csv') %>%
+  mutate(Size = 'full')
+
+data <- rbind(data_10k, data_full) %>%
+  mutate(Group2 = paste(Group, Size, sep='.'),
+         Group2 = as.factor(Group2))
+
+data %>% 
+  filter(Country %in% c('Finland', 'Netherlands')) %>%
+  ggplot(aes(x=value, xmin=low, xmax=high, y=Group2)) +
+    facet_grid(rows = vars(Pretty), cols=vars(measure)) +
+    ggstance::geom_pointrangeh(aes(colour=Group, shape=Size)) +
+    scale_y_discrete(limits=rev) +
+    ylab('Dataset (country and sex)') +
+    theme_bw() +
+    theme(legend.position='bottom')
+
+
+```
+
+# Score on full data relative to 10k data
+
+```{r}
+data_rel <- data %>%
+  group_by(Group, measure) %>%
+  mutate(value_rel2 = value - value[Size == '10k'],
+         low_rel2 = low - low[Size == '10k'],
+         high_rel2 = high - high[Size == '10k']) %>%
+  ungroup()
+
+
+
+data_rel %>% 
+  filter(Country %in% c('Finland', 'Netherlands'),
+         Size == 'full') %>%
+  ggplot(aes(x=value_rel2, y=Group)) +
+    facet_grid(rows=vars(Pretty), cols=vars(measure)) +
+    geom_point(aes(colour=Sex, shape=Country), size=2) +
+    scale_y_discrete(limits=rev) +
+    xlab('Score on full data relative to 10k sample') +
+    ylab('Dataset (country and sex)') +
+    geom_vline(xintercept=0) +
+    theme_bw() +
+    theme(legend.position='bottom')
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

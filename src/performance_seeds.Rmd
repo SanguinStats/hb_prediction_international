@@ -1,0 +1,506 @@
+---
+title: "Comparing multiple subsamples"
+author: "Marieke Vinkenoog"
+date: "4/8/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(stringr)
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(ggpubr)
+```
+
+## Loading data
+
+
+```{r}
+#path <- ''   # Point this to where you saved the folders from all-runs.zip
+path <- 'C:/Users/mvink/OneDrive/PhD/Research/202105 SanguinStats Hb deferral/results/multiple dutch 10k runs v2/'
+setwd(path)
+
+folders <- list.dirs(path, full.names=FALSE, recursive=FALSE)
+folders <- folders[folders != '']
+
+load_files <- function(folder, target_name) {
+  info <- str_split(folder, '-', simplify=TRUE)       # seed, country, size, mode, version
+  file <- paste0(path, folder, target_name)
+  data <- read.csv(file) %>%
+    mutate(seed = info[1],
+           country = info[2],
+           size = info[3],
+           mode = info[4])
+  return(data)
+}
+
+load_dataframes_inner <- function(target_name, folder, info) {
+  info2 = str_split(target_name, '-', simplify=TRUE)
+  file <- paste0(path, folder, '/tmp_rds', target_name)
+  data <- readRDS(file) %>%
+    mutate(seed = info[1],
+           country = info[2],
+           size = info[3],
+           mode = info[4],
+           split = info2[2],
+           sex = info2[3])
+  return(data)
+}
+
+load_dataframes <- function(folder, target_names) {
+  info <- str_split(folder, '-', simplify=TRUE)       # seed, country, size, mode, version
+  datalist <- lapply(target_names, load_dataframes_inner, folder=folder, info=info)
+  data <- bind_rows(datalist)
+  return(data)
+}
+
+datalist <- lapply(folders, load_files, target_name='/summary.csv')
+data <- bind_rows(datalist) %>%
+  filter(Model %in% c('bl', 'rf', 'svm')) %>%
+  rename(ID = `ï..Id`,
+         sex = Sex) %>%
+  mutate(run = paste(size, seed, mode, sep='-'),
+         run = str_replace(run, '10k-', ''))
+
+for (row in 1:nrow(data)) {
+  if (data[row, 'size'] == 'full') {
+    data[row, 'AUPR.full'] = data[row, 'AUPR.value']
+  } else {
+    cur_mode = data[row, 'mode']
+    cur_ID = data[row, 'ID']
+    data[row, 'AUPR.full'] = data[(data$mode == cur_mode) & 
+                                  (data$ID == cur_ID) &
+                                  (data$size == 'full'), 'AUPR.value']
+  }
+}
+
+dflist <- lapply(folders, load_dataframes, target_names=c('/bl-train-male.rds', 
+                                                          '/bl-train-female.rds',
+                                                          '/bl-validate-male.rds',
+                                                          '/bl-validate-female.rds'))
+dfs <- bind_rows(dflist) %>%
+  select(seed, size, mode, split, sex, age, days_to_previous_fb, previous_Hb_def,
+         warm_season, consecutive_deferrals, recent_donations, recent_deferrals, 
+         hour, previous_Hb, Hb_first, Hb_deferral) %>%
+  mutate(run = paste(size, seed, mode, sep='-'),
+         run = str_replace(run, '10k-', '')) %>%
+  separate(sex, c('sex', 'removeme')) %>%
+  select(-removeme)
+```
+
+```{r}
+data %>% 
+  ggplot(aes(x=AUPR.value, xmin=AUPR.low, xmax=AUPR.high, y=Run)) +
+    facet_grid(rows=vars(Pretty), cols=vars(Sex)) +
+    ggstance::geom_pointrangeh(aes(colour=seed, shape=mode)) +
+    scale_colour_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
+                               '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
+                               '#cab2d6','#6a3d9a')) +
+    geom_vline(aes(xintercept=AUPR.full, linetype=mode)) +
+    ylab('Dataset (seed and mode)') +
+    theme_bw() +
+    theme(legend.position='bottom')
+```
+
+```{r}
+data_paired <- data %>%
+  select(ID, Model, Pretty, sex, AUPR.value, seed, mode, size) %>%
+  pivot_wider(names_from=mode, values_from=AUPR.value) %>%
+  mutate(AUPR.diff = final - initial,
+         Run = paste(size, seed, sep='-'),
+         Run = str_replace(Run, '10k-', ''))
+
+data_paired %>% 
+  ggplot(aes(x=AUPR.diff, y=Run)) +
+    facet_grid(rows=vars(Pretty), cols=vars(sex)) +
+    geom_point(aes(colour=seed)) +
+    scale_colour_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
+                               '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
+                               '#cab2d6','#6a3d9a')) +
+    geom_vline(xintercept=0) +
+    xlab('AUPR difference (final minus initial)') +
+    ylab('Seed') +
+    theme_bw() +
+    theme(legend.position='bottom')
+```
+
+# Load histogram files
+(old version, replaced by histograms from raw data)
+
+```{r}
+datalist <- lapply(folders, load_files, target_name='/histogram.csv')
+distrs <- bind_rows(datalist) %>%
+  rename(variable = `ï..name`) %>%
+  separate(id, c(NA, 'sex')) %>%
+  separate(value, c(NA, 'val.lower', 'val.upper', NA), sep='[\\(\\],]', remove=FALSE, convert=TRUE) %>%
+  filter(sex != 'both',
+         variable != 'Year') %>%
+  distinct() %>%
+  mutate(run = paste(size, seed, mode, sep='-'),
+         run = str_replace(run, '10k-', ''),
+         variable = as.factor(variable),
+         sex = as.factor(sex),
+         run = as.factor(run))
+
+distrs %>% 
+  filter(sex == 'female',
+         !variable %in% c('first_event', 'nb_donat_outside', 'Warm season'),
+         size == '10k',
+         mode == 'initial') %>% 
+  ggplot(aes(color=run)) +
+    facet_wrap(~variable, scales='free') +
+    geom_density(aes(x=val.lower, y=n), stat='identity') +
+    geom_point(aes(x=val.lower, y=n)) +
+    scale_colour_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
+                                 '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
+                                 '#cab2d6','#6a3d9a')) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+```{r}
+distrs %>% 
+  filter(variable %in% c('First Hb', 'Hemoglobin', 'Previous Hb'),
+         size == '10k',
+         mode == 'initial') %>% 
+  ggplot(aes(color=run)) +
+    facet_grid(rows=vars(sex), cols=vars(variable), scales='free') +
+    geom_density(aes(x=val.lower, y=n), stat='identity') +
+    geom_point(aes(x=val.lower, y=n)) +
+    scale_colour_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
+                                 '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
+                                 '#cab2d6','#6a3d9a')) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+```{r}
+distrs %>% 
+  filter(variable == 'Previous Hb',
+         size == '10k',
+         mode == 'initial') %>% 
+  ggplot(aes(color=run)) +
+    facet_grid(rows=vars(sex), scales='free') +
+    geom_density(aes(x=val.lower, y=n), stat='identity') +
+    geom_point(aes(x=val.lower, y=n)) +
+    scale_colour_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
+                                 '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
+                                 '#cab2d6','#6a3d9a')) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+
+# Comparing marginal distributions of predictor variables using raw data
+
+Men
+```{r}
+dfs %>%
+  filter(sex == 'male') %>%
+  ggplot() +
+  facet_grid(split~mode) +
+  geom_density(aes(x=previous_Hb, color=run)) +
+  ggtitle('Distribution of previous_Hb by run (male donors)')
+ggsave('../multiple 10k runs/distributions_prevHb_male_nozoom.png', width=10, height=10)
+```
+Women
+```{r}
+dfs %>%
+  filter(sex == 'female') %>%
+  ggplot() +
+  facet_grid(split~mode) +
+  geom_density(aes(x=previous_Hb, color=run)) +
+  ggtitle('Distribution of previous_Hb by run (female donors)')
+ggsave('../multiple 10k runs/distributions_prevHb_female_nozoom.png', width=10, height=10)
+```
+
+# Comparing variable importances (based on SHAP values) across runs
+
+```{r}
+datalist <- lapply(folders, load_files, target_name='/shap-value.csv')
+varimps <- bind_rows(datalist) %>%
+  rename(ID = `ï..Id`) %>%
+  mutate(run = paste(size, seed, mode, sep='-')) %>%
+  separate(ID, c('model', 'sex')) %>%
+  group_by(model, Variable, sex, run) %>%
+  summarise(maa = mean(abs(attribution))) %>%
+  ungroup() %>%
+  separate(run, c('size', 'seed', 'mode'), remove=FALSE) %>%
+  mutate(run = str_replace(run, '10k-', '')) 
+```
+
+# Plots RF
+```{r}
+varimps %>%
+  filter(sex == 'male',
+         model == 'rf',
+         Variable != 'sex') %>%
+  ggplot() +
+  facet_wrap(vars(Variable)) +
+  geom_col(aes(x=run, y=maa, fill=seed), color='black') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  ggtitle('Mean absolute attribution by run for Random Forest models, male donors') +
+  ylab('Mean absolute attribution') +
+  scale_fill_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
+                               '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
+                               '#cab2d6','#6a3d9a'))
+ggsave('../multiple 10k runs/MAE_rf_male.png', width=10, height=10)
+
+varimps %>%
+  filter(sex == 'female',
+         model == 'rf',
+         Variable != 'sex') %>%
+  ggplot() +
+  facet_wrap(vars(Variable)) +
+  geom_col(aes(x=run, y=maa, fill=seed), color='black') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  ggtitle('Mean absolute attribution by run for Random Forest models, female donors') +
+  ylab('Mean absolute attribution') +
+  scale_fill_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
+                               '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
+                               '#cab2d6','#6a3d9a'))
+ggsave('../multiple 10k runs/MAE_rf_female.png', width=10, height=10)
+```
+# Plots SVM
+```{r}
+varimps %>%
+  filter(sex == 'male',
+         model == 'svm',
+         Variable != 'sex') %>%
+  ggplot() +
+  facet_wrap(vars(Variable)) +
+  geom_col(aes(x=run, y=maa, fill=seed), color='black') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  ggtitle('Mean absolute attribution by run for SVM models, male donors') +
+  ylab('Mean absolute attribution') +
+  scale_fill_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
+                               '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
+                               '#cab2d6','#6a3d9a'))
+ggsave('../multiple 10k runs/MAE_svm_male.png', width=10, height=10)
+
+varimps %>%
+  filter(sex == 'female',
+         model == 'svm',
+         Variable != 'sex') %>%
+  ggplot() +
+  facet_wrap(vars(Variable)) +
+  geom_col(aes(x=run, y=maa, fill=seed), color='black') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  ggtitle('Mean absolute attribution by run for SVM models, female donors') +
+  ylab('Mean absolute attribution') +
+  scale_fill_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
+                               '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
+                               '#cab2d6','#6a3d9a'))
+ggsave('../multiple 10k runs/MAE_svm_female.png', width=10, height=10)
+```
+
+# Plots previous_Hb all models
+```{r}
+varimps %>%
+  filter(Variable == 'previous_Hb') %>%
+  ggplot() +
+  facet_grid(rows=vars(sex), cols=vars(model)) +
+  geom_col(aes(x=run, y=maa, fill=seed), color='black') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  ggtitle('Mean absolute attribution of previous_Hb by run for all models, both donors') +
+  ylab('Mean absolute attribution') +
+  scale_fill_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
+                               '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
+                               '#cab2d6','#6a3d9a'))
+ggsave('../multiple 10k runs/MAE_all_prevHb.png', width=10, height=10)
+
+
+```
+
+
+# Scatterplot of MAA in RF versus SVM
+
+```{r}
+varimps_wide <- varimps %>%
+  pivot_wider(names_from = model, values_from = maa)
+
+
+
+varimps_wide %>%
+  filter(sex == 'male',
+         Variable != 'sex',
+         mode == 'final') %>%
+  ggplot() +
+  facet_wrap(vars(Variable)) +
+  geom_point(aes(x=rf, y=svm, color=seed)) + 
+  scale_color_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
+                               '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
+                               '#cab2d6','#6a3d9a')) +
+  ggtitle('MAA of random forest vs support vector machine, male donors') +
+  theme_bw()
+ggsave('../multiple 10k runs/MAA_rf_svm_male.png', width=10, height=10)
+
+varimps_wide %>%
+  filter(sex == 'female',
+         Variable != 'sex',
+         mode == 'final') %>%
+  ggplot() +
+  facet_wrap(vars(Variable)) +
+  geom_point(aes(x=rf, y=svm, color=seed)) + 
+  scale_color_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
+                               '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
+                               '#cab2d6','#6a3d9a')) +
+  ggtitle('MAA of random forest vs support vector machine, female donors') +
+  theme_bw()
+ggsave('../multiple 10k runs/MAA_rf_svm_female.png', width=10, height=10)
+```
+
+# Scaled by total absolute attribution
+
+```{r}
+varimps_wide <- varimps_wide %>%
+  group_by(sex, run) %>%
+  mutate(rf_scaled = rf / sum(rf),
+         svm_scaled = svm / sum(svm))
+
+varimps_wide %>%
+  filter(sex == 'male',
+         Variable != 'sex',
+         mode == 'final') %>%
+  ggplot() +
+  facet_wrap(vars(Variable), scales='free') +
+  geom_point(aes(x=rf_scaled, y=svm_scaled, color=seed)) + 
+  scale_color_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
+                               '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
+                               '#cab2d6','#6a3d9a')) +
+  ggtitle('MAA of random forest vs support vector machine, male donors') +
+  theme_bw()
+ggsave('../multiple 10k runs/MAA_scaled_rf_svm_male.png', width=10, height=10)
+
+varimps_wide %>%
+  filter(sex == 'female',
+         Variable != 'sex',
+         mode == 'final') %>%
+  ggplot() +
+  facet_wrap(vars(Variable), scales='free') +
+  geom_point(aes(x=rf_scaled, y=svm_scaled, color=seed)) + 
+  scale_color_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
+                               '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
+                               '#cab2d6','#6a3d9a')) +
+  ggtitle('MAA of random forest vs support vector machine, female donors') +
+  theme_bw()
+ggsave('../multiple 10k runs/MAA_scaled_rf_svm_female.png', width=10, height=10)
+```
+
+
+# Investigate number of deferrals in sample vs AUPR
+
+```{r}
+datalist <- lapply(folders, load_files, target_name='/sizes.csv')
+data_sizes <- bind_rows(datalist) %>%
+  rename(ID = `ï..Id`) %>%
+  mutate(run = paste(size, seed, mode, sep='-'),
+         run = str_replace(run, '10k-', '')) %>%
+  separate(ID, c('model', 'sex')) %>%
+  filter(model == 'bl') %>%
+  group_by(sex, label, run) %>%
+  mutate(ndeferrals = sum(`Deferred.last.donations`)) %>%
+  ungroup() %>%
+  select(c(sex, label, seed, size, mode, run, ndeferrals)) %>%
+  distinct() %>%
+  pivot_wider(names_from=label, values_from=ndeferrals) %>%
+  mutate(ndeferrals_train = case_when(mode == 'initial' ~ train,
+                                      mode == 'final' ~ train+validate),
+         ndeferrals_test = case_when(mode == 'initial' ~ validate,
+                                     mode == 'final' ~ test))
+
+#data_no_sizes <- data 
+
+data <- data_no_sizes %>%
+  merge(data_sizes, by=c('sex', 'run', 'seed', 'size', 'mode')) %>%
+  select(-starts_with(c('MAE', 'RMSE', 'AUROC', 'F1')))
+```
+
+# Plots ndeferrals vs AUPR
+
+```{r}
+data %>%
+  filter(size == '10k') %>%
+  ggplot() +
+  facet_grid(sex ~ Model) +
+  geom_point(aes(x=ndeferrals_train, y=AUPR.value, color=seed, shape=mode), size=2) +
+  scale_colour_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
+                               '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
+                               '#cab2d6','#6a3d9a')) +
+  theme_bw() +
+  ggtitle('Number of deferrals in train data versus AUPR')
+ggsave('../multiple 10k runs/ndeferrals_train_AUPR.png', width=10, height=10)
+
+data %>%
+  filter(size == '10k') %>%
+  ggplot() +
+  facet_grid(sex ~ Model) +
+  geom_point(aes(x=ndeferrals_test, y=AUPR.value, color=seed, shape=mode), size=2) +
+  scale_colour_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
+                               '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
+                               '#cab2d6','#6a3d9a')) +
+  theme_bw() +
+  ggtitle('Number of deferrals in test data versus AUPR')
+ggsave('../multiple 10k runs/ndeferrals_test_AUPR.png', width=10, height=10)
+```
+
+# Plot ndeferral vs width of CI
+
+```{r}
+data %>%
+  filter(size == '10k') %>%
+  mutate(CIwidth = AUPR.high - AUPR.low) %>%
+  ggplot() +
+  facet_grid(sex ~ Model) +
+  geom_point(aes(x=ndeferrals_train, y=CIwidth, color=seed, shape=mode), size=2) +
+  scale_colour_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
+                               '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
+                               '#cab2d6','#6a3d9a')) +
+  theme_bw() +
+  ggtitle('Number of deferrals in train data versus CI width')
+ggsave('../multiple 10k runs/ndeferrals_train_CIwidth.png', width=10, height=10)
+
+data %>%
+  filter(size == '10k') %>%
+  mutate(CIwidth = AUPR.high - AUPR.low) %>%
+  ggplot() +
+  facet_grid(sex ~ Model) +
+  geom_point(aes(x=ndeferrals_test, y=CIwidth, color=seed, shape=mode), size=2) +
+  scale_colour_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
+                               '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
+                               '#cab2d6','#6a3d9a')) +
+  theme_bw() +
+  ggtitle('Number of deferrals in test data versus CI width')
+ggsave('../multiple 10k runs/ndeferrals_test_CIwidth.png', width=10, height=10)
+```
+
+# AUPR versus CI width?
+
+```{r}
+data %>%
+  filter(size == '10k') %>%
+  mutate(CIwidth = AUPR.high - AUPR.low) %>%
+  ggplot() +
+  facet_grid(sex ~ Model) +
+  geom_point(aes(x=AUPR.value, y=CIwidth, color=seed, shape=mode), size=2) +
+  scale_colour_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
+                               '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
+                               '#cab2d6','#6a3d9a')) +
+  theme_bw() +
+  ggtitle('AUPR value versus CI width')
+ggsave('../multiple 10k runs/AUPR_CIwidth.png', width=10, height=10)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

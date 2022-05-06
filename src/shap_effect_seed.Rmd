@@ -1,0 +1,269 @@
+---
+title: "Untitled"
+author: "Marieke Vinkenoog"
+date: "03/05/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(dplyr)
+library(Rcpp)
+library(cutpointr)
+library(farver)
+library(PRROC)
+library(future)
+library(DALEX)
+library(shapr)
+library(fastshap)
+library(themis)
+library(caret)
+library(kernlab)
+library(tictoc)
+suppressPackageStartupMessages(library(parallel))
+suppressPackageStartupMessages(library(doParallel))
+suppressPackageStartupMessages(library(shapr))
+suppressPackageStartupMessages(library(fastshap))
+suppressPackageStartupMessages(library(ggforce))
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(ranger))
+```
+
+## R Markdown
+
+
+```{r}
+# Caret's predict method only allows type to be "prob" or "raw.
+# We will dig out the ksvm fit object from Caret's fit object and
+# call its predict method directly.
+my_predict <- function(fit, newdata, type="response") {
+  stopifnot("train" %in% class(fit) && "ksvm" %in% class(fit$finalModel))
+  newdata <- predict(fit$preProcess, newdata)  # Preprocess the data the same way Caret does
+  newdata <- newdata %>% select(-any_of(c("sex", "Hb", "Hb_deferral"))) 
+  res <- predict(fit$finalModel, newdata=newdata, type=type) # Call underlying object's predict method
+  return(res)
+}
+
+compute_shap_values_fastshap <- function(model, validate, n=1000, seed, nsim=100) {
+  set.seed(seed)
+  
+  n <- min(n, nrow(validate))
+  
+  validate2 <- validate  %>% slice_sample(n=n) %>% select(-any_of(c("Hb_deferral", "Hb")))
+
+  if ("stanfit" %in% class(model)) {
+    t <- as_tibble(rownames_to_column(as.data.frame(rstan::get_posterior_mean(model))))
+    beta <- t %>% filter(str_detect(rowname, r"(^beta\[\d+\])")) %>% pull(`mean-all chains`) #select(rowname, mean=`mean-all chains`)
+  }
+  
+  pfun_lmm <- function(object, newdata) {
+    #message(colnames(newdata))
+    #message(head(newdata$donb))
+    #message(sprintf("In function pfun_lmm: rows=%i cols=%i", nrow(newdata), ncol(newdata)))
+    result <- as.vector(beta %*% t(as.matrix(newdata %>% select(-donb))) + newdata %>% pull(donb))
+    return(result)
+  }
+  
+  pfun_randomForest <- function(object, newdata) {
+    predict(object, newdata = newdata, type="prob")[,2]
+  }
+  
+  pfun_ranger <- function(object, newdata) {
+    predict(object, data = newdata, type="response")$predictions[,"Deferred"]
+  }
+
+  # Not used currently as this doesn't perform preprocessing on newdata
+  pfun_ksvm <- function(object, newdata) {
+    predict(object, newdata = newdata, type="probabilities")[,2]
+  }
+
+  # This uses decision values instead of probabilities
+  pfun_ksvm_decision <- function(object, newdata) {
+    my_predict(object, newdata = newdata, type="decision")[,1]
+  }
+  
+  # This is Caret's wrapper model
+  pfun_train <- function(object, newdata) {
+    predict(object, newdata = newdata, type="prob")[,2]
+  }
+  
+  
+  if ("randomForest" %in% class(model)) {
+    pfun <- pfun_randomForest
+  } else if ("ksvm" %in% class(model)) {
+    pfun <- pfun_ksvm
+  } else if ("ranger" %in% class(model)) {
+    pfun <- pfun_ranger
+  } else if ("train" %in% class(model)) {
+    if ("ksvm" %in% class(model$finalModel)) {
+      pfun <- pfun_ksvm_decision
+    } else pfun <- pfun_train
+  } else if ("stanfit" %in% class(model)) {
+    pfun <- pfun_lmm
+  }
+  
+  #print(pfun)
+  
+  result_code <- tryCatch(
+    error = function(cnd) {
+      msg <- paste("\nComputation of shap values failed:", cnd$message, 
+                   sep="\n")
+      warning(msg)
+      NULL
+    },
+    {
+      rlang::with_options(lifecycle_verbosity = "quiet", {  # Prevent the deprecation message caused by the explain function
+        if ("lm" %in% class(model)) {
+          shap <- fastshap::explain(model,   # This is for the baseline logistic regression
+                                    feature_names = "previous_Hb",
+                                    newdata = as.data.frame(validate2 %>% select(previous_Hb)),
+                                    exact = TRUE)
+        } else if ("stanfit" %in% class(model)) {
+          shap <- fastshap::explain(model, 
+                                    X = as.data.frame(validate2), 
+                                    #newdata = as.data.frame(validate), 
+                                    feature_names = setdiff(colnames(validate2), "donb"),
+                                    pred_wrapper = pfun, 
+                                    nsim = nsim)
+        } else {
+          shap <- fastshap::explain(model, 
+                                    X = as.data.frame(validate2),
+                                    pred_wrapper = pfun, 
+                                    nsim = nsim)
+        }
+      })
+      shap <- as_tibble(shap)  # This drops the class "explain"
+    }
+    
+  )
+  if (is.null(result_code)) {
+    return(NULL)
+  }
+  
+  if (any(shap %>% mutate(c=if_any(everything(), is.na)) %>% pull(c)) || nrow(shap) == 2*n) {
+    warning("Predict function failed in compute_shap_values_fastshap. You could try rerunning with a different seed")
+    return(NULL)
+  }
+  n <- nrow(validate2)
+  attributions <- shap %>% mutate(id=1:n)
+  attributions <- pivot_longer(attributions, cols=!id) %>%
+    select(Variable=name, id, attribution=value)
+  features <- validate2 %>% mutate(id=1:n)
+  if ("sex" %in% colnames(validate2)) {
+    features <- features %>% mutate(sex = sex=="female")
+  }
+  features <- features %>% pivot_longer(cols=!id) %>%
+    select(Variable=name, id, value=value)
+  res <- inner_join(attributions, features, by=c("Variable", "id")) %>%
+    group_by(Variable) %>%
+    mutate(value=scale(value)[,1]) %>%
+    ungroup()
+  
+  res <- res %>% select(-id) %>% slice_sample(prop = 1.0)  # permute the rows
+  
+  return(res)
+}
+```
+
+
+# Loading datafiles
+
+```{r}
+load_model_validate <- function(path, folder, modelname, sex) {
+  info <- str_split(folder, '-', simplify=TRUE)
+  fileloc <- paste0(path, folder, '/tmp_rds/')
+
+  model <- readRDS(paste0(fileloc, paste0(modelname, '-fit-', sex, '.rds')))
+  validate <- readRDS(paste0(fileloc, paste0(modelname, '-validate-', sex, '.rds')))
+  
+  both <- list(name=paste(folder, modelname, sex, sep='-'), model=model, validate=validate)
+  
+  return(both)
+}
+
+path <- 'C:/Users/mvink/OneDrive/PhD/Research/202105 SanguinStats Hb deferral/results/multiple dutch 10k runs v2/'
+
+folders <- list.dirs(path, full.names=FALSE, recursive=FALSE)
+folders <- folders[folders != '']
+
+folder <- folders[1] # We only need one run for this
+```
+
+# Compute SHAP values on same data/model, but using different seeds
+
+```{r}
+seeds <- c(6652, 2070, 8719, 8473, 1966, 6247, 9593, 1607, 1411, 4375)
+
+# This could probably be nicer using apply...
+svm_female <- load_model_validate(path, folder, 'svm', 'female')
+res_svm_female <- list()
+for (i in 1:length(seeds)) {
+  tic()
+  res <- compute_shap_values_fastshap(svm_female$model, 
+                                      svm_female$validate, 
+                                      n=100, 
+                                      seed=seeds[i])
+  res_svm_female[i] <- list(res)
+  toc()
+}
+
+svm_male <- load_model_validate(path, folder, 'svm', 'male')
+res_svm_male <- list()
+for (i in 1:length(seeds)) {
+  tic()
+  res <- compute_shap_values_fastshap(svm_male$model, 
+                                      svm_male$validate, 
+                                      n=100, 
+                                      seed=seeds[i])
+  res_svm_male[i] <- list(res)
+  toc()
+}
+
+rf_female <- load_model_validate(path, folder, 'rf', 'female')
+res_rf_female <- list()
+for (i in 1:length(seeds)) {
+  tic()
+  res <- compute_shap_values_fastshap(rf_female$model, 
+                                      rf_female$validate, 
+                                      n=100, 
+                                      seed=seeds[i])
+  res_rf_female[i] <- list(res)
+  toc()
+}
+
+rf_male <- load_model_validate(path, folder, 'rf', 'male')
+res_rf_male <- list()
+for (i in 1:length(seeds)) {
+  tic()
+  res <- compute_shap_values_fastshap(rf_male$model, 
+                                      rf_male$validate, 
+                                      n=100, 
+                                      seed=seeds[i])
+  res_rf_male[i] <- list(res)
+  toc()
+}
+
+saveRDS(res_svm_female, paste0(path, 'SHAP_res_svm_female.RDS'))
+saveRDS(res_svm_male, paste0(path, 'SHAP_res_svm_male.RDS'))
+saveRDS(res_rf_female, paste0(path, 'SHAP_res_rf_female.RDS'))
+saveRDS(res_rf_male, paste0(path, 'SHAP_res_rf_male.RDS'))
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
