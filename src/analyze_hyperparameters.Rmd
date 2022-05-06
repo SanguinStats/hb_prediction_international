@@ -18,7 +18,8 @@ library(knitr)
 ```{r}
 base <- "/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-01-29-svm-rf-10k-hyper/tmp"
 svm_base <- base
-rf_base <- "/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-02-04-ranger-hyper"
+rf_base <- "/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-02-09-ranger-hyper"
+#rf_base <- "/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-02-04-ranger-hyper"
 #rf_base <- "/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-02-04-rf-hyper"
 
 #rf_base <- "/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-01-31-rf-hyper-new"
@@ -122,8 +123,11 @@ kable(bind_rows(male=best_rf_male, female=best_rf_female, .id="sex") %>%
 
 ```{r}
 kable(bind_rows(male=best_svm_male, female=best_svm_female, .id="sex") %>% 
-        select(-c("ROCSD", "SensSD", SpecSD)), 
-      digits=3)
+        select(-c("ROCSD", "SensSD", SpecSD)) %>%
+        mutate(across(!sex, ~ formatC(., digit=3, format = "g"))))
+      
+      
+#      format.args=list(digits=3, scientific=TRUE))
 ```
 
 
