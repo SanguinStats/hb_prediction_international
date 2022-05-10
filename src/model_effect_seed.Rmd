@@ -1,0 +1,414 @@
+---
+title: "varimp_effect_seed"
+author: "Marieke Vinkenoog"
+date: '2022-05-09'
+output: html_document
+---
+
+# Introduction
+
+In this script, we have 10 runs of the container on the same 10k donor subsample,
+ran with different seeds. We compare the performance of these different runs - 
+if there is no effect of the seed on the model fitting, the runs should all 
+have the exact same performance.
+
+By loading the fitted models and validation sets and
+recalculating SHAP values with the same seed, we can see if there is an effect
+of the seed anywhere else than in the 10k subsample selection (see performance_seeds.Rmd)
+and in the selection of donors for calculating the SHAP values (see shap_effect_seed.Rmd).
+
+# Libraries
+```{r}
+library(ggstance)
+library(ggplot2)
+library(dplyr)
+
+
+library(Rcpp)
+library(cutpointr)
+library(farver)
+library(PRROC)
+library(future)
+library(DALEX)
+library(shapr)
+library(themis)
+library(caret)
+library(kernlab)
+library(tictoc)
+library(forcats)
+library(grid)
+suppressPackageStartupMessages(library(parallel))
+suppressPackageStartupMessages(library(doParallel))
+suppressPackageStartupMessages(library(shapr))
+suppressPackageStartupMessages(library(fastshap))
+suppressPackageStartupMessages(library(ggforce))
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(ranger))
+```
+
+
+# Functions to load data
+
+```{r}
+load_files <- function(folder, target_name) {
+  info <- str_split(folder, '-', simplify=TRUE)       # seed, country, size, mode, version
+  file <- paste0(path, folder, target_name)
+  data <- read.csv(file) %>%
+    mutate(seed = info[1],
+           country = info[2],
+           size = info[3],
+           mode = info[4])
+  return(data)
+}
+
+load_model_validate <- function(folder, path, modelname, sex) {
+  info <- str_split(folder, '-', simplify=TRUE)
+  fileloc <- paste0(path, folder, '/tmp_rds/')
+
+  model <- readRDS(paste0(fileloc, paste0(modelname, '-fit-', sex, '.rds')))
+  validate <- readRDS(paste0(fileloc, paste0(modelname, '-validate-', sex, '.rds')))
+  
+  both <- list(name=paste(folder, modelname, sex, sep='-'), model=model, validate=validate)
+  
+  return(both)
+}
+```
+
+# Functions to calculate SHAP values
+```{r}
+# Caret's predict method only allows type to be "prob" or "raw.
+# We will dig out the ksvm fit object from Caret's fit object and
+# call its predict method directly.
+my_predict <- function(fit, newdata, type="response") {
+  stopifnot("train" %in% class(fit) && "ksvm" %in% class(fit$finalModel))
+  newdata <- predict(fit$preProcess, newdata)  # Preprocess the data the same way Caret does
+  newdata <- newdata %>% select(-any_of(c("sex", "Hb", "Hb_deferral"))) 
+  res <- predict(fit$finalModel, newdata=newdata, type=type) # Call underlying object's predict method
+  return(res)
+}
+
+compute_shap_values_fastshap <- function(result, seed=123, n=50, nsim=50) {
+  set.seed(seed)
+  name <- result$name
+  model_seed <- str_split(name, '-', simplify=TRUE)[1]
+  model <- result$model
+  validate <- result$validate
+  
+  n <- min(n, nrow(validate))
+  
+  validate2 <- validate  %>% slice_sample(n=n) %>% select(-any_of(c("Hb_deferral", "Hb")))
+
+  if ("stanfit" %in% class(model)) {
+    t <- as_tibble(rownames_to_column(as.data.frame(rstan::get_posterior_mean(model))))
+    beta <- t %>% filter(str_detect(rowname, r"(^beta\[\d+\])")) %>% pull(`mean-all chains`) #select(rowname, mean=`mean-all chains`)
+  }
+  
+  pfun_lmm <- function(object, newdata) {
+    #message(colnames(newdata))
+    #message(head(newdata$donb))
+    #message(sprintf("In function pfun_lmm: rows=%i cols=%i", nrow(newdata), ncol(newdata)))
+    result <- as.vector(beta %*% t(as.matrix(newdata %>% select(-donb))) + newdata %>% pull(donb))
+    return(result)
+  }
+  
+  pfun_randomForest <- function(object, newdata) {
+    predict(object, newdata = newdata, type="prob")[,2]
+  }
+  
+  pfun_ranger <- function(object, newdata) {
+    predict(object, data = newdata, type="response")$predictions[,"Deferred"]
+  }
+
+  # Not used currently as this doesn't perform preprocessing on newdata
+  pfun_ksvm <- function(object, newdata) {
+    predict(object, newdata = newdata, type="probabilities")[,2]
+  }
+
+  # This uses decision values instead of probabilities
+  pfun_ksvm_decision <- function(object, newdata) {
+    my_predict(object, newdata = newdata, type="decision")[,1]
+  }
+  
+  # This is Caret's wrapper model
+  pfun_train <- function(object, newdata) {
+    predict(object, newdata = newdata, type="prob")[,2]
+  }
+  
+  
+  if ("randomForest" %in% class(model)) {
+    pfun <- pfun_randomForest
+  } else if ("ksvm" %in% class(model)) {
+    pfun <- pfun_ksvm
+  } else if ("ranger" %in% class(model)) {
+    pfun <- pfun_ranger
+  } else if ("train" %in% class(model)) {
+    if ("ksvm" %in% class(model$finalModel)) {
+      pfun <- pfun_ksvm_decision
+    } else pfun <- pfun_train
+  } else if ("stanfit" %in% class(model)) {
+    pfun <- pfun_lmm
+  }
+  
+  #print(pfun)
+  
+  result_code <- tryCatch(
+    error = function(cnd) {
+      msg <- paste("\nComputation of shap values failed:", cnd$message, 
+                   sep="\n")
+      warning(msg)
+      NULL
+    },
+    {
+      rlang::with_options(lifecycle_verbosity = "quiet", {  # Prevent the deprecation message caused by the explain function
+        if ("lm" %in% class(model)) {
+          shap <- fastshap::explain(model,   # This is for the baseline logistic regression
+                                    feature_names = "previous_Hb",
+                                    newdata = as.data.frame(validate2 %>% select(previous_Hb)),
+                                    exact = TRUE)
+        } else if ("stanfit" %in% class(model)) {
+          shap <- fastshap::explain(model, 
+                                    X = as.data.frame(validate2), 
+                                    #newdata = as.data.frame(validate), 
+                                    feature_names = setdiff(colnames(validate2), "donb"),
+                                    pred_wrapper = pfun, 
+                                    nsim = nsim)
+        } else {
+          shap <- fastshap::explain(model, 
+                                    X = as.data.frame(validate2),
+                                    pred_wrapper = pfun, 
+                                    nsim = nsim)
+        }
+      })
+      shap <- as_tibble(shap)  # This drops the class "explain"
+    }
+    
+  )
+  if (is.null(result_code)) {
+    return(NULL)
+  }
+  
+  if (any(shap %>% mutate(c=if_any(everything(), is.na)) %>% pull(c)) || nrow(shap) == 2*n) {
+    warning("Predict function failed in compute_shap_values_fastshap. You could try rerunning with a different seed")
+    return(NULL)
+  }
+  n <- nrow(validate2)
+  attributions <- shap %>% mutate(id=1:n)
+  attributions <- pivot_longer(attributions, cols=!id) %>%
+    select(Variable=name, id, attribution=value)
+  features <- validate2 %>% mutate(id=1:n)
+  if ("sex" %in% colnames(validate2)) {
+    features <- features %>% mutate(sex = sex=="female")
+  }
+  features <- features %>% pivot_longer(cols=!id) %>%
+    select(Variable=name, id, value=value)
+  res <- inner_join(attributions, features, by=c("Variable", "id")) %>%
+    group_by(Variable) %>%
+    mutate(value=scale(value)[,1]) %>%
+    ungroup()
+  
+  res <- res %>% select(-id) %>% slice_sample(prop = 1.0)  # permute the rows
+  res <- res %>% mutate(model_seed = model_seed)
+  return(res)
+}
+```
+
+
+
+# Functions to calculate and plot mean absolute attribution
+```{r}
+calc_mean_abs_attr <- function(df) {
+  df <- df %>%
+    filter(Variable != 'sex') %>%
+    mutate(abs_attr = abs(attribution)) %>%
+    group_by(model_seed, Variable) %>%
+    summarise(mean_abs_attr = mean(abs_attr)) %>%
+    ungroup() %>%
+    mutate(Variable = as.factor(Variable),
+           Variable = fct_relevel(Variable, 'previous_Hb', 'recent_deferrals',
+                                  'Hb_first', 'days_to_previous_fb', 'recent_donations',
+                                  'hour', 'previous_Hb_def', 'consecutive_deferrals',
+                                  'warm_season', 'age'))
+  return(list(df))
+}
+
+plot_maa_seeds <- function(df, title) {
+  ggplot() +
+    geom_point(data=df, aes(x=mean_abs_attr, y=Variable, color=model_seed)) +
+    scale_colour_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
+                                 '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
+                                 '#cab2d6','#6a3d9a')) +
+    scale_y_discrete(limits=rev) +
+    ggtitle(paste('Mean absolute attribution in different model seeds,', title)) +
+    theme_bw() + 
+    theme(legend.position='none')
+}
+```
+
+
+
+# Loading data
+The summary.csv files contain the performance measures.
+
+```{r}
+path <- '../../results/multiple dutch 10k runs same sample/'
+
+folders <- list.dirs(path, full.names=FALSE, recursive=FALSE)
+folders <- folders[folders != '']
+
+datalist <- lapply(folders, load_files, target_name='/summary.csv')
+data <- bind_rows(datalist) %>%
+  filter(Model %in% c('bl', 'rf', 'svm')) %>%
+  rename(sex = Sex) %>%
+  mutate(run = paste(size, seed, mode, sep='-'),
+         run = str_replace(run, '10k-', ''))
+```
+
+# Comparing performance between different seeds
+
+```{r}
+data %>% 
+  ggplot(aes(x=AUPR.value, xmin=AUPR.low, xmax=AUPR.high, y=run)) +
+    facet_grid(rows=vars(Pretty), cols=vars(sex)) +
+    ggstance::geom_pointrangeh(aes(colour=seed, shape=mode)) +
+    scale_colour_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
+                               '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
+                               '#cab2d6','#6a3d9a')) +
+    ylab('Dataset (seed and mode)') +
+    theme_bw() +
+    theme(legend.position='bottom')
+
+ggsave('../effect_seed_modelfitting_plots/AUPR.png')
+```
+In the baseline model, there is no difference in performance between the 
+different seeds. The only difference is due to the mode: initial has a higher
+performance than final.
+
+In the random forest (RF) and support vector machine (SVM) models, there are 
+pronounced differences. Variation in performance is larger in men than in 
+women, and is larger in the initial runs than in the final runs. The last
+observation might be explained by the larger sample size in the final run,
+which increases stability of estimates.
+
+# Calculating variable importances in different runs -- mode initial
+
+Because the data is exactly the same in every run (at least within the same mode),
+the seed must be used during the training of the model. We calculate the
+SHAP values of the different models to analyse the differences. We do this
+outside the container rather than loading the shap-value.csv files, because
+the SHAP values are calculated on a 1000 donor subsample, which is dependent on
+the seed, and therefore a different subsample for every run. Here, we use the
+same seed for all runs. 
+
+```{r}
+folders_initial <- grep('initial', folders, value=TRUE)
+
+svm_female <- lapply(folders_initial, load_model_validate, path=path, model='svm', sex='female')
+res_svm_female <- bind_rows(lapply(svm_female, compute_shap_values_fastshap, seed=123))
+maa_svm_female <- calc_mean_abs_attr(res_svm_female)[[1]]
+
+svm_male <- lapply(folders_initial, load_model_validate, path=path, model='svm', sex='male')
+res_svm_male <- bind_rows(lapply(svm_male, compute_shap_values_fastshap, seed=123))
+maa_svm_male <- calc_mean_abs_attr(res_svm_male)[[1]]
+
+rf_female <- lapply(folders_initial, load_model_validate, path=path, model='rf', sex='female')
+res_rf_female <- bind_rows(lapply(rf_female, compute_shap_values_fastshap, seed=123))
+maa_rf_female <- calc_mean_abs_attr(res_rf_female)[[1]]
+
+rf_male <- lapply(folders_initial, load_model_validate, path=path, model='rf', sex='male')
+res_rf_male <- bind_rows(lapply(rf_male, compute_shap_values_fastshap, seed=123))
+maa_rf_male <- calc_mean_abs_attr(res_rf_male)[[1]]
+
+saveRDS(maa_svm_female, '../../results/multiple dutch 10k runs same sample/maa_svm_female_initial.RDS')
+saveRDS(maa_rf_male, '../../results/multiple dutch 10k runs same sample/maa_svm_male_initial.RDS')
+saveRDS(maa_svm_female, '../../results/multiple dutch 10k runs same sample/maa_rf_female_initial.RDS')
+saveRDS(maa_rf_male, '../../results/multiple dutch 10k runs same sample/maa_rf_male_initial.RDS')
+```
+
+# Plots -- mode initial
+
+```{r}
+maa_svm_female <- readRDS('../../results/multiple dutch 10k runs same sample/maa_svm_female_initial.RDS')
+maa_svm_male <- readRDS('../../results/multiple dutch 10k runs same sample/maa_svm_male_initial.RDS')
+maa_rf_female <- readRDS('../../results/multiple dutch 10k runs same sample/maa_rf_female_initial.RDS')
+maa_rf_male <- readRDS('../../results/multiple dutch 10k runs same sample/maa_rf_male_initial.RDS')
+
+plot_maa_seeds(maa_svm_female, 'SVM female, initial')
+ggsave('../effect_seed_modelfitting_plots/svm_female_initial.png')
+plot_maa_seeds(maa_svm_male, 'SVM male, initial')
+ggsave('../effect_seed_modelfitting_plots/svm_male_initial.png')
+plot_maa_seeds(maa_rf_female, 'RF female, initial')
+ggsave('../effect_seed_modelfitting_plots/rf_female_initial.png')
+plot_maa_seeds(maa_rf_male, 'RF male, initial')
+ggsave('../effect_seed_modelfitting_plots/rf_male_initial.png')
+```
+
+# Same for mode final
+
+```{r}
+folders_final <- grep('final', folders, value=TRUE)
+
+svm_female <- lapply(folders_final, load_model_validate, path=path, model='svm', sex='female')
+res_svm_female <- bind_rows(lapply(svm_female, compute_shap_values_fastshap, seed=123))
+maa_svm_female <- calc_mean_abs_attr(res_svm_female)[[1]]
+
+svm_male <- lapply(folders_final, load_model_validate, path=path, model='svm', sex='male')
+res_svm_male <- bind_rows(lapply(svm_male, compute_shap_values_fastshap, seed=123))
+maa_svm_male <- calc_mean_abs_attr(res_svm_male)[[1]]
+
+rf_female <- lapply(folders_final, load_model_validate, path=path, model='rf', sex='female')
+res_rf_female <- bind_rows(lapply(rf_female, compute_shap_values_fastshap, seed=123))
+maa_rf_female <- calc_mean_abs_attr(res_rf_female)[[1]]
+
+rf_male <- lapply(folders_final, load_model_validate, path=path, model='rf', sex='male')
+res_rf_male <- bind_rows(lapply(rf_male, compute_shap_values_fastshap, seed=123))
+maa_rf_male <- calc_mean_abs_attr(res_rf_male)[[1]]
+
+saveRDS(maa_svm_female, '../../results/multiple dutch 10k runs same sample/maa_svm_female_final.RDS')
+saveRDS(maa_rf_male, '../../results/multiple dutch 10k runs same sample/maa_svm_male_final.RDS')
+saveRDS(maa_svm_female, '../../results/multiple dutch 10k runs same sample/maa_rf_female_final.RDS')
+saveRDS(maa_rf_male, '../../results/multiple dutch 10k runs same sample/maa_rf_male_final.RDS')
+```
+
+# Plots -- mode final
+
+```{r}
+maa_svm_female <- readRDS('../../results/multiple dutch 10k runs same sample/maa_svm_female_final.RDS')
+maa_svm_male <- readRDS('../../results/multiple dutch 10k runs same sample/maa_svm_male_final.RDS')
+maa_rf_female <- readRDS('../../results/multiple dutch 10k runs same sample/maa_rf_female_final.RDS')
+maa_rf_male <- readRDS('../../results/multiple dutch 10k runs same sample/maa_rf_male_final.RDS')
+
+plot_maa_seeds(maa_svm_female, 'SVM female, final')
+ggsave('../effect_seed_modelfitting_plots/svm_female_final.png')
+plot_maa_seeds(maa_svm_male, 'SVM male, final')
+ggsave('../effect_seed_modelfitting_plots/svm_male_final.png')
+plot_maa_seeds(maa_rf_female, 'RF female, final')
+ggsave('../effect_seed_modelfitting_plots/rf_female_final.png')
+plot_maa_seeds(maa_rf_male, 'RF male, final')
+ggsave('../effect_seed_modelfitting_plots/rf_male_final.png')
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

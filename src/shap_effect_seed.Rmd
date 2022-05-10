@@ -1,9 +1,18 @@
 ---
-title: "Untitled"
+title: "Effect of seed on SHAP value computation"
 author: "Marieke Vinkenoog"
 date: "03/05/2022"
 output: html_document
 ---
+
+# Introduction
+
+In this script we take one container run, and compute SHAP values multiple
+times using different seeds to select the donors to compute them on.
+We do this for n=1000 (used in the container), n=100 and n=2000 (the full
+test set in the final run).
+
+# Libraries
 
 ```{r setup, include=FALSE, warning=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -22,6 +31,7 @@ library(caret)
 library(kernlab)
 library(tictoc)
 library(forcats)
+library(grid)
 suppressPackageStartupMessages(library(parallel))
 suppressPackageStartupMessages(library(doParallel))
 suppressPackageStartupMessages(library(shapr))
@@ -31,8 +41,24 @@ suppressPackageStartupMessages(library(tidyverse))
 suppressPackageStartupMessages(library(ranger))
 ```
 
-## R Markdown
 
+# Functions for loading data
+```{r}
+load_model_validate <- function(path, folder, modelname, sex) {
+  info <- str_split(folder, '-', simplify=TRUE)
+  fileloc <- paste0(path, folder, '/tmp_rds/')
+
+  model <- readRDS(paste0(fileloc, paste0(modelname, '-fit-', sex, '.rds')))
+  validate <- readRDS(paste0(fileloc, paste0(modelname, '-validate-', sex, '.rds')))
+  
+  both <- list(name=paste(folder, modelname, sex, sep='-'), model=model, validate=validate)
+  
+  return(both)
+}
+```
+
+
+# Functions for calculating SHAP values (extracted from container)
 
 ```{r}
 # Caret's predict method only allows type to be "prob" or "raw.
@@ -168,22 +194,49 @@ compute_shap_values_fastshap <- function(model, validate, n=1000, seed, nsim=100
 ```
 
 
+
+# Functions for calculating and plotting mean absolute attribution
+
+```{r}
+calc_mean_abs_attr <- function(df, seed) {
+  df <- df %>%
+    filter(Variable != 'sex') %>%
+    mutate(abs_attr = abs(attribution)) %>%
+    group_by(Variable) %>%
+    summarise(mean_abs_attr = mean(abs_attr)) %>%
+    ungroup() %>%
+    mutate(seed = seed,
+           Variable = as.factor(Variable),
+           Variable = fct_relevel(Variable, 'previous_Hb', 'recent_deferrals',
+                                  'Hb_first', 'days_to_previous_fb', 'recent_donations',
+                                  'hour', 'previous_Hb_def', 'consecutive_deferrals',
+                                  'warm_season', 'age'))
+  return(list(df))
+}
+
+plot_maa_seeds <- function(df, title, full) {
+  grob <- grobTree(textGrob('Cross shows value for full test set', x=0.6, y=0.05,
+                   hjust=0, gp=gpar(col="black", fontsize=10, fontface="italic")))
+  ggplot() +
+    geom_point(data=df, aes(x=mean_abs_attr, y=Variable, color=as.character(seed))) +
+    scale_colour_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
+                                 '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
+                                 '#cab2d6','#6a3d9a')) +
+    scale_y_discrete(limits=rev) +
+    ggtitle(paste('Mean absolute attribution in different seeds,', title)) +
+    geom_point(data=full, aes(x=mean_abs_attr, y=Variable), shape=4, size=4) +
+    theme_bw() + 
+    theme(legend.position='none') +
+    annotation_custom(grob)
+}
+```
+
+
+
 # Loading datafiles
 
 ```{r}
-load_model_validate <- function(path, folder, modelname, sex) {
-  info <- str_split(folder, '-', simplify=TRUE)
-  fileloc <- paste0(path, folder, '/tmp_rds/')
-
-  model <- readRDS(paste0(fileloc, paste0(modelname, '-fit-', sex, '.rds')))
-  validate <- readRDS(paste0(fileloc, paste0(modelname, '-validate-', sex, '.rds')))
-  
-  both <- list(name=paste(folder, modelname, sex, sep='-'), model=model, validate=validate)
-  
-  return(both)
-}
-
-path <- 'C:/Users/mvink/OneDrive/PhD/Research/202105 SanguinStats Hb deferral/results/multiple dutch 10k runs v2/'
+path <- '../../results/multiple dutch 10k runs v2/'
 
 folders <- list.dirs(path, full.names=FALSE, recursive=FALSE)
 folders <- folders[folders != '']
@@ -195,7 +248,50 @@ svm_male <- load_model_validate(path, folder, 'svm', 'male')
 rf_female <- load_model_validate(path, folder, 'rf', 'female')
 rf_male <- load_model_validate(path, folder, 'rf', 'male')
 
+seeds <- c(6652, 2070, 8719, 8473, 1966, 6247, 9593, 1607, 1411, 4375)
 ```
+
+# Calculating SHAP values on the full validation set (n=2000)
+These are then plotted alongside the SHAP values of the different subsamples.
+
+```{r}
+seeds <- c(6652, 2070, 8719, 8473, 1966, 6247, 9593, 1607, 1411, 4375)
+
+tic()
+res_svm_female_full <- compute_shap_values_fastshap(svm_female$model, 
+                                                    svm_female$validate,
+                                                    n=2000,
+                                                    seed=123)
+toc()
+tic()
+res_svm_male_full <- compute_shap_values_fastshap(svm_male$model, 
+                                                  svm_male$validate,
+                                                  n=2000,
+                                                  seed=123)
+toc()
+tic()
+res_rf_female_full <- compute_shap_values_fastshap(rf_female$model, 
+                                                   rf_female$validate,
+                                                   n=2000,
+                                                   seed=123)
+toc()
+tic()
+res_rf_male_full <- compute_shap_values_fastshap(rf_male$model, 
+                                                 rf_male$validate,
+                                                 n=2000,
+                                                 seed=123)
+toc()
+
+saveRDS(res_svm_female_full, paste0(path, 'SHAP_res_svm_female_full.RDS'))
+saveRDS(res_svm_male_full, paste0(path, 'SHAP_res_svm_male_full.RDS'))
+saveRDS(res_rf_female_full, paste0(path, 'SHAP_res_rf_female_full.RDS'))
+saveRDS(res_rf_male_full, paste0(path, 'SHAP_res_rf_male_full.RDS'))
+```
+
+
+
+
+
 
 # Compute SHAP values on same data/model, but using different seeds, n=100
 
@@ -248,129 +344,57 @@ for (i in 1:length(seeds)) {
   toc()
 }
 
-saveRDS(res_svm_female, paste0(path, 'SHAP_res_svm_female.RDS'))
-saveRDS(res_svm_male, paste0(path, 'SHAP_res_svm_male.RDS'))
-saveRDS(res_rf_female, paste0(path, 'SHAP_res_rf_female.RDS'))
-saveRDS(res_rf_male, paste0(path, 'SHAP_res_rf_male.RDS'))
+saveRDS(res_svm_female, paste0(path, 'SHAP_res_svm_female_100.RDS'))
+saveRDS(res_svm_male, paste0(path, 'SHAP_res_svm_male_100.RDS'))
+saveRDS(res_rf_female, paste0(path, 'SHAP_res_rf_female_100.RDS'))
+saveRDS(res_rf_male, paste0(path, 'SHAP_res_rf_male_100.RDS'))
 
 ```
 
-# Comparing SHAP values of same data, different seed
+# Load SHAP values for full validation set
 
 ```{r}
-res_svm_female <- readRDS(paste0(path, 'SHAP_res_svm_female.RDS'))
-res_svm_male <- readRDS(paste0(path, 'SHAP_res_svm_male.RDS'))
-res_rf_female <- readRDS(paste0(path, 'SHAP_res_rf_female.RDS'))
-res_rf_male <- readRDS(paste0(path, 'SHAP_res_rf_male.RDS'))
+res_svm_female_full <- readRDS(paste0(path, 'SHAP_res_svm_female_full.RDS'))
+res_svm_male_full <- readRDS(paste0(path, 'SHAP_res_svm_male_full.RDS'))
+res_rf_female_full <- readRDS(paste0(path, 'SHAP_res_rf_female_full.RDS'))
+res_rf_male_full <- readRDS(paste0(path, 'SHAP_res_rf_male_full.RDS'))
 
-calc_mean_abs_attr <- function(df, seed) {
-  df <- df %>%
-    filter(Variable != 'sex') %>%
-    mutate(abs_attr = abs(attribution)) %>%
-    group_by(Variable) %>%
-    summarise(mean_abs_attr = mean(abs_attr)) %>%
-    ungroup() %>%
-    mutate(seed = seed,
-           Variable = as.factor(Variable),
-           Variable = fct_relevel(Variable, 'previous_Hb', 'recent_deferrals',
-                                  'Hb_first', 'days_to_previous_fb', 'recent_donations',
-                                  'hour', 'previous_Hb_def', 'consecutive_deferrals',
-                                  'warm_season', 'age'))
-  return(list(df))
-}
+maa_svm_female_full <- calc_mean_abs_attr(res_svm_female_full, 0)[[1]]
+maa_svm_male_full <- calc_mean_abs_attr(res_svm_male_full, 0)[[1]]
+maa_rf_female_full <- calc_mean_abs_attr(res_rf_female_full, 0)[[1]]
+maa_rf_male_full <- calc_mean_abs_attr(res_rf_male_full, 0)[[1]]
+```
+
+
+# Comparing SHAP values different seeds for n=100
+
+```{r}
+# Load SHAP values for n=100
+res_svm_female <- readRDS(paste0(path, 'SHAP_res_svm_female_100.RDS'))
+res_svm_male <- readRDS(paste0(path, 'SHAP_res_svm_male_100.RDS'))
+res_rf_female <- readRDS(paste0(path, 'SHAP_res_rf_female_100.RDS'))
+res_rf_male <- readRDS(paste0(path, 'SHAP_res_rf_male_100.RDS'))
 
 maa_svm_female <- bind_rows(mapply(calc_mean_abs_attr, res_svm_female, seeds, SIMPLIFY=TRUE))
 maa_svm_male <- bind_rows(mapply(calc_mean_abs_attr, res_svm_male, seeds, SIMPLIFY=TRUE))
 maa_rf_female <- bind_rows(mapply(calc_mean_abs_attr, res_rf_female, seeds, SIMPLIFY=TRUE))
 maa_rf_male <- bind_rows(mapply(calc_mean_abs_attr, res_rf_male, seeds, SIMPLIFY=TRUE))
 
-maa_svm_female %>%
-  ggplot() +
-  geom_point(aes(x=mean_abs_attr, y=Variable, color=as.character(seed))) +
-  scale_colour_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
-                               '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
-                               '#cab2d6','#6a3d9a')) +
-  scale_y_discrete(limits=rev) +
-  ggtitle('Mean absolute attribution in different seeds, SVM female') +
-  theme_bw() + 
-  theme(legend.position="none")
-ggsave('../effect_seed_shap_plots/maa_svm_female.png')
+plot_maa_seeds(maa_svm_female, 'SVM female, n=100', maa_svm_female_full)
+ggsave('../effect_seed_shap_plots/maa_svm_female_n100.png')
 
-maa_svm_male %>%
-  ggplot() +
-  geom_point(aes(x=mean_abs_attr, y=Variable, color=as.character(seed))) +
-  scale_colour_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
-                               '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
-                               '#cab2d6','#6a3d9a')) +
-  scale_y_discrete(limits=rev) +
-  ggtitle('Mean absolute attribution in different seeds, SVM male') +
-  theme_bw() + 
-  theme(legend.position="none")
-ggsave('../effect_seed_shap_plots/maa_svm_male.png')
+plot_maa_seeds(maa_svm_male, 'SVM male, n=100', maa_svm_male_full)
+ggsave('../effect_seed_shap_plots/maa_svm_male_n100.png')
 
-maa_rf_female %>%
-  ggplot() +
-  geom_point(aes(x=mean_abs_attr, y=Variable, color=as.character(seed))) +
-  scale_colour_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
-                               '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
-                               '#cab2d6','#6a3d9a')) +
-  scale_y_discrete(limits=rev) +
-  ggtitle('Mean absolute attribution in different seeds, rf female') +
-  theme_bw() + 
-  theme(legend.position="none")
-ggsave('../effect_seed_shap_plots/maa_rf_female.png')
+plot_maa_seeds(maa_rf_female, 'RF female, n=100', maa_rf_female_full)
+ggsave('../effect_seed_shap_plots/maa_rf_female_n100.png')
 
-maa_rf_male %>%
-  ggplot() +
-  geom_point(aes(x=mean_abs_attr, y=Variable, color=as.character(seed))) +
-  scale_colour_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
-                               '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
-                               '#cab2d6','#6a3d9a')) +
-  scale_y_discrete(limits=rev) +
-  ggtitle('Mean absolute attribution in different seeds, rf male') +
-  theme_bw() + 
-  theme(legend.position="none")
-ggsave('../effect_seed_shap_plots/maa_rf_male.png')
-```
-
-# Calculating SHAP values on the full validation set (rather than n=100)
-
-```{r}
-seeds <- c(6652, 2070, 8719, 8473, 1966, 6247, 9593, 1607, 1411, 4375)
-
-tic()
-res_svm_female_full <- compute_shap_values_fastshap(svm_female$model, 
-                                                    svm_female$validate,
-                                                    n=2000,
-                                                    seed=123)
-toc()
-tic()
-res_svm_male_full <- compute_shap_values_fastshap(svm_male$model, 
-                                                  svm_male$validate,
-                                                  n=2000,
-                                                  seed=123)
-toc()
-tic()
-res_rf_female_full <- compute_shap_values_fastshap(rf_female$model, 
-                                                   rf_female$validate,
-                                                   n=2000,
-                                                   seed=123)
-toc()
-tic()
-res_rf_male_full <- compute_shap_values_fastshap(rf_male$model, 
-                                                 rf_male$validate,
-                                                 n=2000,
-                                                 seed=123)
-toc()
-
-saveRDS(res_svm_female_full, paste0(path, 'SHAP_res_svm_female_full.RDS'))
-saveRDS(res_svm_male_full, paste0(path, 'SHAP_res_svm_male_full.RDS'))
-saveRDS(res_rf_female_full, paste0(path, 'SHAP_res_rf_female_full.RDS'))
-saveRDS(res_rf_male_full, paste0(path, 'SHAP_res_rf_male_full.RDS'))
+plot_maa_seeds(maa_rf_male, 'RF male, n=100', maa_rf_male_full)
+ggsave('../effect_seed_shap_plots/maa_rf_male_n100.png')
 ```
 
 
-# Trying n=1000 for different seeds
+# Calculating SHAP values for n=1000 for different seeds
 
 ```{r}
 seeds <- c(6652, 2070, 8719, 8473, 1966, 6247, 9593, 1607, 1411, 4375)
@@ -425,6 +449,31 @@ saveRDS(res_rf_female_1000, paste0(path, 'SHAP_res_rf_female_1000.RDS'))
 saveRDS(res_rf_male_1000, paste0(path, 'SHAP_res_rf_male_1000.RDS'))
 ```
 
+# Comparing SHAP values for n=1000
+
+```{r}
+res_svm_female_1000 <- readRDS(paste0(path, 'SHAP_res_svm_female_1000.RDS'))
+res_svm_male_1000 <- readRDS(paste0(path, 'SHAP_res_svm_male_1000.RDS'))
+res_rf_female_1000 <- readRDS(paste0(path, 'SHAP_res_rf_female_1000.RDS'))
+res_rf_male_1000 <- readRDS(paste0(path, 'SHAP_res_rf_male_1000.RDS'))
+
+maa_svm_female <- bind_rows(mapply(calc_mean_abs_attr, res_svm_female_1000, seeds, SIMPLIFY=TRUE))
+maa_svm_male <- bind_rows(mapply(calc_mean_abs_attr, res_svm_male_1000, seeds, SIMPLIFY=TRUE))
+maa_rf_female <- bind_rows(mapply(calc_mean_abs_attr, res_rf_female_1000, seeds, SIMPLIFY=TRUE))
+maa_rf_male <- bind_rows(mapply(calc_mean_abs_attr, res_rf_male_1000, seeds, SIMPLIFY=TRUE))
+
+plot_maa_seeds(maa_svm_female, 'SVM female n=1000', maa_svm_female_full)
+ggsave('../effect_seed_shap_plots/maa_svm_female_n1000.png')
+
+plot_maa_seeds(maa_svm_male, 'SVM male n=1000', maa_svm_male_full)
+ggsave('../effect_seed_shap_plots/maa_svm_male_n1000.png')
+
+plot_maa_seeds(maa_rf_female, 'RF female n=1000', maa_rf_female_full)
+ggsave('../effect_seed_shap_plots/maa_rf_female_n1000.png')
+
+plot_maa_seeds(maa_rf_male, 'RF male n=1000', maa_rf_male_full)
+ggsave('../effect_seed_shap_plots/maa_rf_male_n1000.png')
+```
 
 
 

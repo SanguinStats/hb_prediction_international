@@ -5,6 +5,21 @@ date: "4/8/2022"
 output: html_document
 ---
 
+# Introduction
+
+This script looks at how different seeds affect performance (AUPR) of models
+in the Hb-predictor container. Runs with ten different seeds were performed
+on the Dutch data, with 10k subsamples. The seed affects the selection of the
+subsample, which is the most obvious cause for variation in performance.
+The seed might also be used by packages when the models are trained, and thus
+lead to different models even if the same data is used (see model_effect_seed.Rmd).
+Last, the seed is used by the SHAP value calculator to take a 100 donor subsample
+to calculate SHAP values on (see shap_effect_seed.Rmd).
+
+Here, we look at the variation in performance in runs with 10 different seeds.
+
+
+# Libraries
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 library(stringr)
@@ -14,17 +29,9 @@ library(tidyverse)
 library(ggpubr)
 ```
 
-## Loading data
-
-
+# Functions for loading data
 ```{r}
-#path <- ''   # Point this to where you saved the folders from all-runs.zip
-path <- 'C:/Users/mvink/OneDrive/PhD/Research/202105 SanguinStats Hb deferral/results/multiple dutch 10k runs v2/'
-setwd(path)
-
-folders <- list.dirs(path, full.names=FALSE, recursive=FALSE)
-folders <- folders[folders != '']
-
+# For summary files containing model performances
 load_files <- function(folder, target_name) {
   info <- str_split(folder, '-', simplify=TRUE)       # seed, country, size, mode, version
   file <- paste0(path, folder, target_name)
@@ -36,6 +43,7 @@ load_files <- function(folder, target_name) {
   return(data)
 }
 
+# Called by load_dataframes below
 load_dataframes_inner <- function(target_name, folder, info) {
   info2 = str_split(target_name, '-', simplify=TRUE)
   file <- paste0(path, folder, '/tmp_rds', target_name)
@@ -49,21 +57,33 @@ load_dataframes_inner <- function(target_name, folder, info) {
   return(data)
 }
 
+# For fitted model and validation files (not usually returned by container!)
 load_dataframes <- function(folder, target_names) {
   info <- str_split(folder, '-', simplify=TRUE)       # seed, country, size, mode, version
   datalist <- lapply(target_names, load_dataframes_inner, folder=folder, info=info)
   data <- bind_rows(datalist)
   return(data)
 }
+```
 
+# Load summary data
+
+```{r}
+path <- '../../results/multiple dutch 10k runs v2/'
+
+folders <- list.dirs(path, full.names=FALSE, recursive=FALSE)
+folders <- folders[folders != '']
+
+# Data on model performances
 datalist <- lapply(folders, load_files, target_name='/summary.csv')
 data <- bind_rows(datalist) %>%
   filter(Model %in% c('bl', 'rf', 'svm')) %>%
-  rename(ID = `ï..Id`,
+  rename(ID = Id,
          sex = Sex) %>%
   mutate(run = paste(size, seed, mode, sep='-'),
          run = str_replace(run, '10k-', ''))
 
+# Add corresponding AUPR on full data as a separate variable
 for (row in 1:nrow(data)) {
   if (data[row, 'size'] == 'full') {
     data[row, 'AUPR.full'] = data[row, 'AUPR.value']
@@ -75,25 +95,14 @@ for (row in 1:nrow(data)) {
                                   (data$size == 'full'), 'AUPR.value']
   }
 }
-
-dflist <- lapply(folders, load_dataframes, target_names=c('/bl-train-male.rds', 
-                                                          '/bl-train-female.rds',
-                                                          '/bl-validate-male.rds',
-                                                          '/bl-validate-female.rds'))
-dfs <- bind_rows(dflist) %>%
-  select(seed, size, mode, split, sex, age, days_to_previous_fb, previous_Hb_def,
-         warm_season, consecutive_deferrals, recent_donations, recent_deferrals, 
-         hour, previous_Hb, Hb_first, Hb_deferral) %>%
-  mutate(run = paste(size, seed, mode, sep='-'),
-         run = str_replace(run, '10k-', '')) %>%
-  separate(sex, c('sex', 'removeme')) %>%
-  select(-removeme)
 ```
+
+# Plot AUPR differences between runs
 
 ```{r}
 data %>% 
-  ggplot(aes(x=AUPR.value, xmin=AUPR.low, xmax=AUPR.high, y=Run)) +
-    facet_grid(rows=vars(Pretty), cols=vars(Sex)) +
+  ggplot(aes(x=AUPR.value, xmin=AUPR.low, xmax=AUPR.high, y=run)) +
+    facet_grid(rows=vars(Pretty), cols=vars(sex)) +
     ggstance::geom_pointrangeh(aes(colour=seed, shape=mode)) +
     scale_colour_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
                                '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
@@ -102,7 +111,10 @@ data %>%
     ylab('Dataset (seed and mode)') +
     theme_bw() +
     theme(legend.position='bottom')
+ggsave('../effect_10ksample_performance_plots/AUPR.png')
 ```
+
+# Plot difference between AUPR in both modes between runs
 
 ```{r}
 data_paired <- data %>%
@@ -124,73 +136,28 @@ data_paired %>%
     ylab('Seed') +
     theme_bw() +
     theme(legend.position='bottom')
+
+ggsave('../effect_10ksample_performance_plots/AUPR_mode_diff.png')
 ```
 
-# Load histogram files
-(old version, replaced by histograms from raw data)
-
+# Load fitted models and validation files 
 ```{r}
-datalist <- lapply(folders, load_files, target_name='/histogram.csv')
-distrs <- bind_rows(datalist) %>%
-  rename(variable = `ï..name`) %>%
-  separate(id, c(NA, 'sex')) %>%
-  separate(value, c(NA, 'val.lower', 'val.upper', NA), sep='[\\(\\],]', remove=FALSE, convert=TRUE) %>%
-  filter(sex != 'both',
-         variable != 'Year') %>%
-  distinct() %>%
+dflist <- lapply(folders, load_dataframes, target_names=c('/bl-train-male.rds', 
+                                                          '/bl-train-female.rds',
+                                                          '/bl-validate-male.rds',
+                                                          '/bl-validate-female.rds'))
+dfs <- bind_rows(dflist) %>%
+  select(seed, size, mode, split, sex, age, days_to_previous_fb, previous_Hb_def,
+         warm_season, consecutive_deferrals, recent_donations, recent_deferrals, 
+         hour, previous_Hb, Hb_first, Hb_deferral) %>%
   mutate(run = paste(size, seed, mode, sep='-'),
-         run = str_replace(run, '10k-', ''),
-         variable = as.factor(variable),
-         sex = as.factor(sex),
-         run = as.factor(run))
-
-distrs %>% 
-  filter(sex == 'female',
-         !variable %in% c('first_event', 'nb_donat_outside', 'Warm season'),
-         size == '10k',
-         mode == 'initial') %>% 
-  ggplot(aes(color=run)) +
-    facet_wrap(~variable, scales='free') +
-    geom_density(aes(x=val.lower, y=n), stat='identity') +
-    geom_point(aes(x=val.lower, y=n)) +
-    scale_colour_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
-                                 '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
-                                 '#cab2d6','#6a3d9a')) +
-    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
-```
-
-```{r}
-distrs %>% 
-  filter(variable %in% c('First Hb', 'Hemoglobin', 'Previous Hb'),
-         size == '10k',
-         mode == 'initial') %>% 
-  ggplot(aes(color=run)) +
-    facet_grid(rows=vars(sex), cols=vars(variable), scales='free') +
-    geom_density(aes(x=val.lower, y=n), stat='identity') +
-    geom_point(aes(x=val.lower, y=n)) +
-    scale_colour_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
-                                 '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
-                                 '#cab2d6','#6a3d9a')) +
-    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
-```
-
-```{r}
-distrs %>% 
-  filter(variable == 'Previous Hb',
-         size == '10k',
-         mode == 'initial') %>% 
-  ggplot(aes(color=run)) +
-    facet_grid(rows=vars(sex), scales='free') +
-    geom_density(aes(x=val.lower, y=n), stat='identity') +
-    geom_point(aes(x=val.lower, y=n)) +
-    scale_colour_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
-                                 '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
-                                 '#cab2d6','#6a3d9a')) +
-    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+         run = str_replace(run, '10k-', '')) %>%
+  separate(sex, c('sex', 'removeme')) %>%
+  select(-removeme)
 ```
 
 
-# Comparing marginal distributions of predictor variables using raw data
+# Comparing marginal distributions of predictor variables 
 
 Men
 ```{r}
@@ -200,25 +167,42 @@ dfs %>%
   facet_grid(split~mode) +
   geom_density(aes(x=previous_Hb, color=run)) +
   ggtitle('Distribution of previous_Hb by run (male donors)')
-ggsave('../multiple 10k runs/distributions_prevHb_male_nozoom.png', width=10, height=10)
-```
-Women
-```{r}
+ggsave('../effect_10ksample_performance_plots/distributions_prevHb_male_nozoom.png', width=10, height=10)
+
 dfs %>%
   filter(sex == 'female') %>%
   ggplot() +
   facet_grid(split~mode) +
   geom_density(aes(x=previous_Hb, color=run)) +
   ggtitle('Distribution of previous_Hb by run (female donors)')
-ggsave('../multiple 10k runs/distributions_prevHb_female_nozoom.png', width=10, height=10)
+ggsave('../effect_10ksample_performance_plots/distributions_prevHb_female_nozoom.png', width=10, height=10)
+
+dfs %>%
+  filter(sex == 'male') %>%
+  ggplot() +
+  facet_grid(split~mode) +
+  geom_density(aes(x=previous_Hb, color=run)) +
+  xlim(110,190) +
+  ggtitle('Distribution of previous_Hb by run (male donors)')
+ggsave('../effect_10ksample_performance_plots/distributions_prevHb_male_zoom.png', width=10, height=10)
+
+dfs %>%
+  filter(sex == 'female') %>%
+  ggplot() +
+  facet_grid(split~mode) +
+  geom_density(aes(x=previous_Hb, color=run)) +
+  xlim(100,180) +
+  ggtitle('Distribution of previous_Hb by run (female donors)')
+ggsave('../effect_10ksample_performance_plots/distributions_prevHb_female_zoom.png', width=10, height=10)
 ```
+
 
 # Comparing variable importances (based on SHAP values) across runs
 
 ```{r}
 datalist <- lapply(folders, load_files, target_name='/shap-value.csv')
 varimps <- bind_rows(datalist) %>%
-  rename(ID = `ï..Id`) %>%
+  rename(ID = Id) %>%
   mutate(run = paste(size, seed, mode, sep='-')) %>%
   separate(ID, c('model', 'sex')) %>%
   group_by(model, Variable, sex, run) %>%
@@ -243,7 +227,7 @@ varimps %>%
   scale_fill_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
                                '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
                                '#cab2d6','#6a3d9a'))
-ggsave('../multiple 10k runs/MAE_rf_male.png', width=10, height=10)
+ggsave('../effect_10ksample_performance_plots/MAA_rf_male.png', width=10, height=10)
 
 varimps %>%
   filter(sex == 'female',
@@ -258,7 +242,7 @@ varimps %>%
   scale_fill_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
                                '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
                                '#cab2d6','#6a3d9a'))
-ggsave('../multiple 10k runs/MAE_rf_female.png', width=10, height=10)
+ggsave('../effect_10ksample_performance_plots/MAA_rf_female.png', width=10, height=10)
 ```
 # Plots SVM
 ```{r}
@@ -275,7 +259,7 @@ varimps %>%
   scale_fill_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
                                '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
                                '#cab2d6','#6a3d9a'))
-ggsave('../multiple 10k runs/MAE_svm_male.png', width=10, height=10)
+ggsave('../effect_10ksample_performance_plots/MAA_svm_male.png', width=10, height=10)
 
 varimps %>%
   filter(sex == 'female',
@@ -290,7 +274,7 @@ varimps %>%
   scale_fill_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
                                '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
                                '#cab2d6','#6a3d9a'))
-ggsave('../multiple 10k runs/MAE_svm_female.png', width=10, height=10)
+ggsave('../effect_10ksample_performance_plots/MAA_svm_female.png', width=10, height=10)
 ```
 
 # Plots previous_Hb all models
@@ -306,7 +290,7 @@ varimps %>%
   scale_fill_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
                                '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
                                '#cab2d6','#6a3d9a'))
-ggsave('../multiple 10k runs/MAE_all_prevHb.png', width=10, height=10)
+ggsave('../effect_10ksample_performance_plots/MAA_all_prevHb.png', width=10, height=10)
 
 
 ```
@@ -317,8 +301,6 @@ ggsave('../multiple 10k runs/MAE_all_prevHb.png', width=10, height=10)
 ```{r}
 varimps_wide <- varimps %>%
   pivot_wider(names_from = model, values_from = maa)
-
-
 
 varimps_wide %>%
   filter(sex == 'male',
@@ -332,7 +314,7 @@ varimps_wide %>%
                                '#cab2d6','#6a3d9a')) +
   ggtitle('MAA of random forest vs support vector machine, male donors') +
   theme_bw()
-ggsave('../multiple 10k runs/MAA_rf_svm_male.png', width=10, height=10)
+ggsave('../effect_10ksample_performance_plots/MAA_rf_svm_male.png', width=10, height=10)
 
 varimps_wide %>%
   filter(sex == 'female',
@@ -346,7 +328,7 @@ varimps_wide %>%
                                '#cab2d6','#6a3d9a')) +
   ggtitle('MAA of random forest vs support vector machine, female donors') +
   theme_bw()
-ggsave('../multiple 10k runs/MAA_rf_svm_female.png', width=10, height=10)
+ggsave('../effect_10ksample_performance_plots/MAA_rf_svm_female.png', width=10, height=10)
 ```
 
 # Scaled by total absolute attribution
@@ -392,7 +374,7 @@ ggsave('../multiple 10k runs/MAA_scaled_rf_svm_female.png', width=10, height=10)
 ```{r}
 datalist <- lapply(folders, load_files, target_name='/sizes.csv')
 data_sizes <- bind_rows(datalist) %>%
-  rename(ID = `ï..Id`) %>%
+  rename(ID = Id) %>%
   mutate(run = paste(size, seed, mode, sep='-'),
          run = str_replace(run, '10k-', '')) %>%
   separate(ID, c('model', 'sex')) %>%
@@ -406,90 +388,44 @@ data_sizes <- bind_rows(datalist) %>%
   mutate(ndeferrals_train = case_when(mode == 'initial' ~ train,
                                       mode == 'final' ~ train+validate),
          ndeferrals_test = case_when(mode == 'initial' ~ validate,
-                                     mode == 'final' ~ test))
+                                     mode == 'final' ~ test),
+         defrate_train = case_when(mode == 'initial' ~ ndeferrals_train/6400,
+                                   mode == 'final' ~ ndeferrals_train/8000),
+         defrate_test = case_when(mode == 'initial' ~ ndeferrals_test/1600,
+                                  mode == 'final' ~ ndeferrals_test/2000))
 
-#data_no_sizes <- data 
-
-data <- data_no_sizes %>%
+data <- data %>%
   merge(data_sizes, by=c('sex', 'run', 'seed', 'size', 'mode')) %>%
   select(-starts_with(c('MAE', 'RMSE', 'AUROC', 'F1')))
 ```
 
-# Plots ndeferrals vs AUPR
+# Plot proportion of deferrals vs AUPR
 
 ```{r}
 data %>%
   filter(size == '10k') %>%
   ggplot() +
   facet_grid(sex ~ Model) +
-  geom_point(aes(x=ndeferrals_train, y=AUPR.value, color=seed, shape=mode), size=2) +
+  geom_point(aes(x=defrate_train, y=AUPR.value, color=seed, shape=mode), size=2) +
   scale_colour_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
                                '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
                                '#cab2d6','#6a3d9a')) +
   theme_bw() +
-  ggtitle('Number of deferrals in train data versus AUPR')
-ggsave('../multiple 10k runs/ndeferrals_train_AUPR.png', width=10, height=10)
+  ggtitle('Proportion of deferrals in train data versus AUPR')
+ggsave('../effect_10ksample_performance_plots/defrate_train_AUPR.png', width=10, height=10)
 
 data %>%
   filter(size == '10k') %>%
   ggplot() +
   facet_grid(sex ~ Model) +
-  geom_point(aes(x=ndeferrals_test, y=AUPR.value, color=seed, shape=mode), size=2) +
+  geom_point(aes(x=defrate_test, y=AUPR.value, color=seed, shape=mode), size=2) +
   scale_colour_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
                                '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
                                '#cab2d6','#6a3d9a')) +
   theme_bw() +
-  ggtitle('Number of deferrals in test data versus AUPR')
-ggsave('../multiple 10k runs/ndeferrals_test_AUPR.png', width=10, height=10)
+  ggtitle('Proportion of deferrals in test data versus AUPR')
+ggsave('../effect_10ksample_performance_plots/defrate_test_AUPR.png', width=7, height=4)
 ```
-
-# Plot ndeferral vs width of CI
-
-```{r}
-data %>%
-  filter(size == '10k') %>%
-  mutate(CIwidth = AUPR.high - AUPR.low) %>%
-  ggplot() +
-  facet_grid(sex ~ Model) +
-  geom_point(aes(x=ndeferrals_train, y=CIwidth, color=seed, shape=mode), size=2) +
-  scale_colour_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
-                               '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
-                               '#cab2d6','#6a3d9a')) +
-  theme_bw() +
-  ggtitle('Number of deferrals in train data versus CI width')
-ggsave('../multiple 10k runs/ndeferrals_train_CIwidth.png', width=10, height=10)
-
-data %>%
-  filter(size == '10k') %>%
-  mutate(CIwidth = AUPR.high - AUPR.low) %>%
-  ggplot() +
-  facet_grid(sex ~ Model) +
-  geom_point(aes(x=ndeferrals_test, y=CIwidth, color=seed, shape=mode), size=2) +
-  scale_colour_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
-                               '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
-                               '#cab2d6','#6a3d9a')) +
-  theme_bw() +
-  ggtitle('Number of deferrals in test data versus CI width')
-ggsave('../multiple 10k runs/ndeferrals_test_CIwidth.png', width=10, height=10)
-```
-
-# AUPR versus CI width?
-
-```{r}
-data %>%
-  filter(size == '10k') %>%
-  mutate(CIwidth = AUPR.high - AUPR.low) %>%
-  ggplot() +
-  facet_grid(sex ~ Model) +
-  geom_point(aes(x=AUPR.value, y=CIwidth, color=seed, shape=mode), size=2) +
-  scale_colour_manual(values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c',
-                               '#fb9a99','#e31a1c','#fdbf6f','#ff7f00',
-                               '#cab2d6','#6a3d9a')) +
-  theme_bw() +
-  ggtitle('AUPR value versus CI width')
-ggsave('../multiple 10k runs/AUPR_CIwidth.png', width=10, height=10)
-```
-
 
 
 
