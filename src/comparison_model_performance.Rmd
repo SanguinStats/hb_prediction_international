@@ -11,82 +11,145 @@ library(ggplot2)
 library(dplyr)
 library(tidyr)
 library(ggstance)
+library(stringr)
 ```
 
+# Functions to load data 
 ```{r}
-load_summary_data <- function(file) {
-  data_raw <- read.csv(file, stringsAsFactors = TRUE)
-  colnames(data_raw)[1] <- 'Country'
-  data_wide <- data_raw %>%
-    select(Country, Id, Model, Pretty, Sex, 
-           AUROC.value, AUROC.low, AUROC.high,
-           AUPR.value, AUPR.low, AUPR.high,
-           F1.value, F1.low, F1.high)
-  
-  data <- data_wide %>%
-    pivot_longer(AUROC.value:F1.high,
-                 names_to = c('measure', 'estimate'),
-                 names_sep = '\\.',
-                 values_to = 'value') %>%
-    pivot_wider(names_from = estimate,
-                values_from = value) %>%
-    mutate(measure = as.factor(measure),
-           Model = Pretty,
-           Group = as.character(interaction(Country,Sex))) %>%
-    arrange(Group) %>%
-    mutate(Group = as.factor(Group)) %>%
-    group_by(Group, measure) %>%
-    mutate(value_rel = value - value[Model == 'Baseline'],
-           low_rel = low - low[Model == 'Baseline'],
-           high_rel = high - high[Model == 'Baseline']) %>%
-    ungroup()
-  
+load_files <- function(folder, target_name) {
+  info <- str_split(folder, '-', simplify=TRUE)       # country, size
+  file <- paste0(path, folder, target_name)
+  data <- read.csv(file) %>%
+    mutate(country = info[1],
+           size = info[2])
   return(data)
 }
-
-data <- load_summary_data('20220301_summary_all-10k.csv')
-
-data %>% 
-  ggplot(aes(x=value, xmin=low, xmax=high, y=Group)) +
-    facet_grid(rows = vars(Pretty), cols=vars(measure)) +
-    ggstance::geom_pointrangeh(aes(colour=Sex, shape=Country)) +
-    scale_y_discrete(limits=rev) +
-    ylab('Dataset (country and sex)') +
-    theme_bw() +
-    theme(legend.position='bottom')
-
 ```
 
-# Baseline scores
-```{r}
-data %>% 
-  filter(Model == 'Baseline') %>%
-  ggplot(aes(x=value, xmin=low, xmax=high, y=Group)) +
-    facet_grid(cols=vars(measure)) +
-    ggstance::geom_pointrangeh(aes(colour=Sex, shape=Country)) +
-    scale_y_discrete(limits=rev) +
-    ylab('Dataset (country and sex)') +
-    theme_bw() +
-    theme(legend.position='bottom')
-```
-
-
-# Model scores relative to baseline
-
+# Loading files 
+These are all runs on mode 'final'.
 
 ```{r}
-data %>% 
-  filter(Model != 'Baseline') %>%
-  ggplot(aes(x=value_rel, xmin=low_rel, xmax=high_rel, y=Group)) +
-    facet_grid(rows=vars(Pretty), cols=vars(measure)) +
-    ggstance::geom_pointrangeh(aes(colour=Sex, shape=Country)) +
-    scale_y_discrete(limits=rev) +
-    ylab('Dataset (country and sex)') +
-    geom_vline(xintercept=0) +
-    theme_bw() +
-    theme(legend.position='bottom')
-  
+path <- '../../results/v0.32_results/'
+
+folders <- list.dirs(path, full.names=FALSE, recursive=FALSE)
+folders_10k <- grep('10k', folders, value=TRUE)
+
+# sizes.csv is needed to calculate deferral rate in train/validate sets
+datalist <- lapply(folders_10k, load_files, target_name='/sizes.csv')
+data_sizes <- bind_rows(datalist) %>%
+  separate(Id, into=c(NA, 'sex'), sep='-') %>%
+  distinct() %>%
+  mutate(deferral_rate = Deferred.last.donations / Donors,
+         country = case_when(country=='BE' ~ 'Belgium',
+                             country=='NL' ~ 'Netherlands',
+                             country=='FL' ~ 'Finland',
+                             country=='SA' ~ 'South Africa')) %>%
+  select(country, sex, Dataset, deferral_rate) %>%
+  pivot_wider(names_from=Dataset, names_prefix='defrate_', values_from=deferral_rate)
+
+# summary.csv contains the performance measures
+datalist <- lapply(folders_10k, load_files, target_name='/summary.csv')
+data_aupr <- bind_rows(datalist) %>%
+  select(country, Pretty, Sex, AUPR.value, AUPR.low, AUPR.high) %>%
+  mutate(country = case_when(country=='BE' ~ 'Belgium',
+                             country=='NL' ~ 'Netherlands',
+                             country=='FL' ~ 'Finland',
+                             country=='SA' ~ 'South Africa'),
+         country = as.factor(country),
+         model = factor(str_to_title(Pretty), 
+                           levels=c('Baseline',
+                                    'Random Forest',
+                                    'Support Vector Machine',
+                                    'Linear Mixed Model',
+                                    'Dynamic Linear Mixed Model')),
+         sex = as.factor(Sex)) %>%
+  select(-Pretty, -Sex) %>%
+  merge(data_sizes, by=c('country', 'sex'), all.x=TRUE) %>%
+  mutate(AUPR.value.adj = (AUPR.value - defrate_validate),
+         AUPR.low.adj   = AUPR.low   - defrate_validate,
+         AUPR.high.adj  = AUPR.high  - defrate_validate)
 ```
+
+# Plotting AUPR per model
+
+```{r}
+data_aupr %>% 
+  ggplot(aes(x=AUPR.value.adj, xmin=AUPR.low.adj, xmax=AUPR.high.adj, y=country)) +
+    facet_grid(rows=vars(model), cols=vars(sex), labeller=labeller(model=label_wrap_gen(10),
+                                                                   sex=str_to_title)) +
+    ggstance::geom_pointrangeh(aes(colour=sex, shape=country)) +
+    scale_y_discrete(limits=rev) +
+    xlab('Area Under Precision-Recall Curve, adjusted for deferral rate') +
+    theme_bw() +
+    theme(legend.position='none',
+          strip.text.y.right=element_text(angle=0))
+
+ggsave('../plots_for_manuscript/AUPR_comparison.png')
+```
+# Plotting deferral rate vs AUPR 
+
+```{r}
+data_aupr %>%
+  ggplot(aes(x=defrate_validate, y=AUPR.value.adj, color=country, shape=country)) +
+  facet_grid(rows=vars(model), cols=vars(sex), labeller=labeller(model=label_wrap_gen(10),
+                                                                   sex=capitalize),
+             scales='free_x') +
+  geom_point(size=2) +
+  xlab('Deferral rate in validation data') +
+  ylab('Area Under Precision-Recall Curve, \nadjusted for deferral rate') +
+  theme_bw() +
+    theme(legend.position='bottom',
+          strip.text.y.right=element_text(angle=0))
+
+ggsave('../plots_for_manuscript/defrate_vs_AUPR.png')
+```
+
+# Loading results on full datasets
+
+```{r}
+folders_full <- grep('full', folders, value=TRUE)
+
+# sizes.csv is needed to calculate deferral rate in train/validate sets
+datalist <- lapply(folders_full, load_files, target_name='/sizes.csv')
+data_sizes_full <- bind_rows(datalist) %>%
+  separate(Id, into=c(NA, 'sex'), sep='-') %>%
+  distinct() %>%
+  mutate(deferral_rate = Deferred.last.donations / Donors,
+         country = case_when(country=='BE' ~ 'Belgium',
+                             country=='NL' ~ 'Netherlands',
+                             country=='FL' ~ 'Finland',
+                             country=='SA' ~ 'South Africa')) %>%
+  select(country, sex, Dataset, deferral_rate) %>%
+  pivot_wider(names_from=Dataset, names_prefix='defrate_', values_from=deferral_rate)
+
+# summary.csv contains the performance measures
+datalist <- lapply(folders_full, load_files, target_name='/summary.csv')
+data_aupr_full <- bind_rows(datalist) %>%
+  select(country, Pretty, Sex, AUPR.value, AUPR.low, AUPR.high) %>%
+  mutate(country = case_when(country=='BE' ~ 'Belgium',
+                             country=='NL' ~ 'Netherlands',
+                             country=='FL' ~ 'Finland',
+                             country=='SA' ~ 'South Africa'),
+         country = as.factor(country),
+         model = factor(str_to_title(Pretty), 
+                           levels=c('Baseline',
+                                    'Random Forest',
+                                    'Support Vector Machine',
+                                    'Linear Mixed Model',
+                                    'Dynamic Linear Mixed Model')),
+         sex = as.factor(Sex)) %>%
+  select(-Pretty, -Sex) %>%
+  merge(data_sizes_full, by=c('country', 'sex'), all.x=TRUE) %>%
+  mutate(AUPR.value.adj = (AUPR.value - defrate_validate),
+         AUPR.low.adj   = AUPR.low   - defrate_validate,
+         AUPR.high.adj  = AUPR.high  - defrate_validate)
+```
+
+
+
+
+
 
 
 # Comparing model performance in 10k sample and fulldata
