@@ -81,6 +81,7 @@ data_aupr %>%
     ggstance::geom_pointrangeh(aes(colour=sex, shape=country)) +
     scale_y_discrete(limits=rev) +
     xlab('Area Under Precision-Recall Curve, adjusted for deferral rate') +
+    ylab('') +
     theme_bw() +
     theme(legend.position='none',
           strip.text.y.right=element_text(angle=0))
@@ -93,7 +94,7 @@ ggsave('../plots_for_manuscript/AUPR_comparison.png')
 data_aupr %>%
   ggplot(aes(x=defrate_validate, y=AUPR.value.adj, color=country, shape=country)) +
   facet_grid(rows=vars(model), cols=vars(sex), labeller=labeller(model=label_wrap_gen(10),
-                                                                   sex=capitalize),
+                                                                   sex=str_to_title),
              scales='free_x') +
   geom_point(size=2) +
   xlab('Deferral rate in validation data') +

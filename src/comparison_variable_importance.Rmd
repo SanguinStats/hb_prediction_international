@@ -12,198 +12,98 @@ library(tidyr)
 library(ggplot2)
 ```
 
-
+# Functions to load data 
 ```{r}
-load_data <- function(filename) {
-  data <- read.csv(filename, fileEncoding="UTF-8-BOM") %>%
-    mutate(Id = replace(Id, grepl('ï»¿', Id, fixed = TRUE), 'rf-male')) %>%
-    mutate(model = as.factor(Id),
-           variable = as.factor(Variable)) %>%
-    select(model, variable, attribution, value) %>%
-    filter(!(variable %in% c('sex', 'year')))
+load_files <- function(folder, target_name) {
+  info <- str_split(folder, '-', simplify=TRUE)       # country, size
+  file <- paste0(path, folder, target_name)
+  data <- read.csv(file) %>%
+    mutate(country = info[1],
+           size = info[2])
   return(data)
 }
 
-get_mean_abs_attr <- function(data) {
-  data <- data %>%
-    group_by(model, variable) %>%
-    summarise(mean_abs_attribution = mean(abs(attribution))) %>%
-    ungroup() %>%
-    group_by(model) %>%
-    arrange(desc(mean_abs_attribution), .by_group = TRUE) %>%
-    mutate(rank = dense_rank(desc(mean_abs_attribution))) %>%
-    ungroup()
-  return(data)
-}
+```
 
-# scale_mean_abs_attr <- function(data) {
-#   data <- data %>%
-#     group_by(model) %>%
-#     arrange(desc(mean_abs_attribution), .by_group = TRUE) %>%
-#     mutate(scaled_mean_abs_attr = mean_abs_attribution / sum(mean_abs_attribution),
-#            rank = dense_rank(desc(mean_abs_attribution))) 
-#   return(data)
-# }
-```
+# Loading files with SHAP values
+These are all runs on mode 'final'.
+
 ```{r}
-FL <- get_mean_abs_attr(load_data('shap_values/finland.csv'))
-NL <- get_mean_abs_attr(load_data('shap_values/netherlands.csv'))
-BE <- get_mean_abs_attr(load_data('shap_values/belgium.csv'))
-SA <- get_mean_abs_attr(load_data('shap_values/southafrica.csv'))
+path <- '../../results/v0.32_results/'
+
+folders <- list.dirs(path, full.names=FALSE, recursive=FALSE)
+folders_10k <- grep('10k', folders, value=TRUE)
+
+datalist <- lapply(folders_10k, load_files, target_name='/shap-value.csv')
+data_shap <- bind_rows(datalist) %>%
+  separate(Id, into=c('model', 'sex'), sep='-') %>%
+  select(country, model, sex, Variable, attribution, value) %>%
+  filter(Variable != 'sex') %>%
+  mutate(country = case_when(country=='BE' ~ 'Belgium',
+                             country=='NL' ~ 'Netherlands',
+                             country=='FL' ~ 'Finland',
+                             country=='SA' ~ 'South Africa'),
+         country = as.factor(country),
+         Variable = as.factor(Variable),
+         model = case_when(model=='bl' ~ 'Baseline',
+                           model=='rf' ~ 'Random Forest',
+                           model=='svm' ~ 'Support Vector Machine',
+                           model=='lmm' ~ 'Linear Mixed Model',
+                           model=='dlmm' ~ 'Dynamic Linear Mixed Model'),
+         model = factor(model, 
+                        levels=c('Baseline',
+                                 'Random Forest',
+                                 'Support Vector Machine',
+                                 'Linear Mixed Model',
+                                 'Dynamic Linear Mixed Model')),
+         sex = as.factor(sex)) %>%
+  rename(variable = Variable)  
+
+data_maa <- data_shap %>%
+  group_by(country, sex, model, variable) %>%
+  summarise(maa = mean(abs(attribution))) %>%
+  ungroup() %>%
+  group_by(sex, model, variable) %>%
+  mutate(avg_maa = mean(maa)) %>%
+  ungroup()
+  
 ```
+
+
+
 
 Dataframes per model
 
 ```{r}
-combine_per_model <- function(FL, NL, BE, SA, model) {
-  if (nrow(SA[SA$model == model, ]) != 0) {
-    df <- merge(FL[FL$model == model, ],
-              NL[NL$model == model, ],
-              by = 'variable',
-              suffixes = c('.FL', '.NL')) %>%
-    merge(BE[BE$model == model, ],
-          by = 'variable') %>%
-    rename(mean_abs_attribution.BE = mean_abs_attribution,
-         rank.BE = rank) %>%
-    merge(SA[SA$model == model, ],
-          by = 'variable') %>%
-    rename(mean_abs_attribution.SA = mean_abs_attribution,
-         rank.SA = rank) %>%
-    select(-c(model.FL, model.NL, model.x, model.y)) %>%
-    rowwise() %>%
-    mutate(avg_attr = mean(c(mean_abs_attribution.FL,
-                             mean_abs_attribution.NL,
-                             mean_abs_attribution.BE,
-                             mean_abs_attribution.SA))) %>%
-    pivot_longer(cols = -c(variable, avg_attr),
-               names_to = c('.value', 'country'),
-               names_sep = '\\.')
-  } else {
-    df <- merge(FL[FL$model == model, ],
-              NL[NL$model == model, ],
-              by = 'variable',
-              suffixes = c('.FL', '.NL')) %>%
-    merge(BE[BE$model == model, ],
-          by = 'variable') %>%
-    rename(mean_abs_attribution.BE = mean_abs_attribution,
-         rank.BE = rank) %>%
-    select(-c(model.FL, model.NL, model)) %>%
-    rowwise() %>%
-    mutate(avg_attr = mean(c(mean_abs_attribution.FL,
-                             mean_abs_attribution.NL,
-                             mean_abs_attribution.BE))) %>%
-    pivot_longer(cols = -c(variable, avg_attr),
-               names_to = c('.value', 'country'),
-               names_sep = '\\.')
-  }
-  
-  return(df)
-}
-
-plot_comp_model <- function(model_df, model) {
-  plt <- model_df %>% ggplot(aes(x = reorder(variable, avg_attr), y = mean_abs_attribution, group = country)) +
-    geom_line(aes(color = country), size = 2) +
-    geom_col(aes(y = avg_attr), alpha = 0.2, position = 'identity') +
-    coord_flip() + 
-    ggtitle(paste0('Variable importance, model ', model)) +
-    xlab('Variable') + ylab('Mean absolute attribution')
+plot_comp_model <- function(data, modelname) {
+  data_plt <- data %>%
+    filter(model == modelname)
+  plt <- ggplot(data=data_plt, aes(x = reorder(variable, avg_maa))) +
+      facet_grid(cols = vars(sex)) +
+      geom_line(mapping=aes(y = maa, group = country, color = country), size = 1) +
+      geom_point(mapping=aes(y = maa, color = country), size = 2) +
+      geom_col(mapping=aes(y = avg_maa), alpha = 0.2, position = 'identity') +
+      coord_flip() +
+      ggtitle(paste0('Variable importance, model ', modelname)) +
+      xlab('Variable') + ylab('Mean absolute attribution') +
+      theme_bw()
   return(plt)
 }
 
-for (model in c('rf-male','rf-female','svm-male','svm-female','lmm-male','lmm-female','dlmm-male','dlmm-female')) {
-  df_model <- combine_per_model(FL, NL, BE, SA, model=model)
-  print(plot_comp_model(df_model, model=model))
-}
+plot_comp_model(data_maa, 'Random Forest')
+ggsave('../plots_for_manuscript/varimp_RF.png', height=4, width=7)
 
-model <- 'rf-female'
-df_model <- combine_per_model(FL, NL, BE, SA, model=model)
-print(plot_comp_model(df_model, model=model))
+plot_comp_model(data_maa, 'Support Vector Machine')
+ggsave('../plots_for_manuscript/varimp_SVM.png', height=4, width=7)
 
+plot_comp_model(data_maa, 'Linear Mixed Model')
+ggsave('../plots_for_manuscript/varimp_LMM.png', height=4, width=7)
 
-```
-Only NL and FL
-
-```{r}
-combine_per_model <- function(FL, NL, model) {
-  df <- merge(FL[FL$model == model, ],
-              NL[NL$model == model, ],
-              by = 'variable',
-              suffixes = c('.FL', '.NL')) %>%
-    select(-c(model.FL, model.NL)) %>%
-    rowwise() %>%
-    mutate(avg_rank = mean(c(rank.FL, rank.NL)),
-           avg_scaled_attr = mean(c(scaled_mean_abs_attr.FL,
-                                    scaled_mean_abs_attr.NL))) %>%
-    arrange(avg_rank) %>%
-    pivot_longer(cols = -c(variable, avg_rank, avg_scaled_attr),
-               names_to = c('.value', 'country'),
-               names_sep = '\\.')
-  return(df)
-}
-
-plot_comp_model <- function(model_df, model) {
-  plt <- model_df %>% ggplot(aes(x = reorder(variable, desc(avg_rank)), y = scaled_mean_abs_attr, group = country)) +
-    geom_line(aes(color = country), size = 2) +
-    geom_col(aes(y = avg_scaled_attr), alpha = 0.2, position = 'identity') +
-    coord_flip() + 
-    ggtitle(paste0('Variable importance, model ', model)) +
-    xlab('Variable') + ylab('Scaled mean absolute attribution')
-  return(plt)
-}
-
-for (model in unique(FL_s$model)) {
-  df_model <- combine_per_model(FL_s, NL_s, model=model)
-  print(plot_comp_model(df_model, model=model))
-}
+plot_comp_model(data_maa, 'Dynamic Linear Mixed Model')
+ggsave('../plots_for_manuscript/varimp_DLMM.png', height=4, width=7)
 
 ```
 
-# For a single country, compare 10k and full data
-
-```{r}
-fi_10k <- get_mean_abs_attr(load_data('../results/v0.32_results/FL-10k-results-0.32/shap-value.csv'))
-fi_full <- get_mean_abs_attr(load_data('../results/v0.32_results/FL-full-results-0.32/shap-value.csv'))
-
-
-combine_per_model <- function(data1, data2, model, suffixes, groupname) {
-  df <- merge(data1[data1$model == model, ],
-              data2[data2$model == model, ],
-              by = 'variable',
-              suffixes = suffixes) %>%
-    select(-c(starts_with('model'))) %>%
-    rowwise() %>%
-    mutate(avg_rank = mean(c_across(starts_with('rank'))),
-           avg_scaled_attr = mean(c_across(starts_with('mean_abs_attribution')))) %>%
-    arrange(avg_rank) %>%
-    pivot_longer(cols = -c(variable, avg_rank, avg_scaled_attr),
-               names_to = c('.value', groupname),
-               names_sep = '\\.')
-  return(df)
-}
-
-plot_comp_model <- function(model_df, model) {
-  plt <- model_df %>% 
-    ggplot(aes(x = reorder(variable, desc(avg_rank)), y = mean_abs_attribution, group = size)) +
-    geom_line(aes(color = size), size = 2) +
-    geom_col(aes(y = avg_scaled_attr), alpha = 0.2, position = 'identity') +
-    coord_flip() + 
-    ggtitle(paste0('Variable importance, model ', model)) +
-    xlab('Variable') + ylab('Mean absolute attribution')
-  return(plt)
-}
-
-for (model in unique(fi_10k$model)) {
-  if (model %in% c('bl-male','bl-female')) {
-  } else {
-      df_model <- combine_per_model(fi_10k, fi_full, 
-                                model=model, 
-                                suffixes=c('.10k','.full'),
-                                groupname='size')
-      print(plot_comp_model(df_model, model=model))
-  }
-}
-
-```
 
 
 
