@@ -1,0 +1,86 @@
+---
+title: "Comparison of regression coefficients"
+author: "Marieke Vinkenoog"
+output: html_document
+date: "2022-09-06"
+---
+
+```{r}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+```
+
+# Functions to load data 
+```{r}
+load_files <- function(folder, target_name) {
+  info <- str_split(folder, '-', simplify=TRUE)       # country, size
+  file <- paste0(path, folder, target_name)
+  data <- read.csv(file) %>%
+    mutate(country = info[1],
+           size = info[2])
+  return(data)
+}
+```
+
+# Loading files with coefficients
+
+```{r}
+path <- '../../results/v0.32_results/'
+
+folders <- list.dirs(path, full.names=FALSE, recursive=FALSE)
+folders_10k <- grep('10k', folders, value=TRUE)
+folders_10k <- grep('bl', folders_10k, value=TRUE, invert=TRUE)
+
+datalist <- lapply(folders_10k, load_files, target_name='/effect-size.csv')
+data_coef <- bind_rows(datalist) %>%
+  separate(Id, into=c('model', 'sex'), sep='-') %>%
+  select(country, model, sex, names, mean) %>%
+  rename(variable = names,
+         coefficient = mean) 
+
+coef_ordered <- c('Previous Hb', 'First Hb', 'Days to previous full blood donation',
+                  'Warm season', 'Recent low hemoglobins', 'Recent donations',
+                  'Age', 'Hour', 'Previous event low hemoglobin', 'Consecutive deferrals')
+
+for (vmodel in c('lmm', 'dlmm')) {
+  for (vsex in c('male', 'female')) {
+    df <- data_coef %>%
+              filter(model == vmodel,
+                     sex == vsex) %>%
+              pivot_wider(names_from = c(country),
+                          values_from = coefficient)
+    df <- df[match(coef_ordered, df$variable), ]
+    write.csv(df, file=paste0(path, 'coefs_', vmodel, '_', vsex, '.csv'))
+  }
+}
+```
+
+
+```{r}
+data_coef2 <- bind_rows(datalist) %>%
+  separate(Id, into=c('model', 'sex'), sep='-') %>%
+  select(country, model, sex, names, mean, low, high) %>%
+  rename(variable = names) %>%
+  filter(variable %in% coef_ordered)
+
+data_coef2 <- data_coef2[match(coef_ordered, data_coef2$variable), ]
+
+data_coef2 %>% 
+  ggplot(aes(x=mean, xmin=low, xmax=high, y=variable)) +
+    facet_grid(rows=vars(model), cols=vars(sex), labeller=labeller(sex=str_to_title)) +
+    ggstance::geom_pointrangeh(aes(colour=country, shape=country)) +
+    scale_shape_manual(values=c(18, 15, 8, 17, 16)) +
+    scale_y_discrete(limits=rev) +
+    xlab('Regression coefficient') +
+    ylab('') +
+    theme_bw() +
+    theme(legend.position='bottom',
+          strip.text.y.right=element_text(angle=0))
+```
+
+
+
+
+
