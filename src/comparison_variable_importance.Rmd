@@ -42,8 +42,19 @@ data_shap <- bind_rows(datalist) %>%
   mutate(country = case_when(country=='BE' ~ 'Belgium',
                              country=='NL' ~ 'Netherlands',
                              country=='FL' ~ 'Finland',
-                             country=='SA' ~ 'South Africa'),
+                             country=='SA' ~ 'South Africa',
+                             country=='AU' ~ 'Australia'),
          country = as.factor(country),
+         Variable = case_when(Variable=='age' ~ 'Age',
+                              Variable=='consecutive_deferrals' ~ 'Consecutive deferrals',
+                              Variable=='days_to_previous_fb' ~ 'Days to previous whole blood donation',
+                              Variable=='Hb_first' ~ 'First Hb',
+                              Variable=='hour' ~ 'Time',
+                              Variable=='previous_Hb' ~ 'Previous Hb',
+                              Variable=='previous_Hb_def' ~ 'Previous visit low Hb',
+                              Variable=='recent_deferrals' ~ 'Recent low Hb',
+                              Variable=='recent_donations' ~ 'Recent donations',
+                              Variable=='warm_season' ~ 'Warm season'),
          Variable = as.factor(Variable),
          model = case_when(model=='bl' ~ 'Baseline',
                            model=='rf' ~ 'Random Forest',
@@ -65,6 +76,9 @@ data_maa <- data_shap %>%
   ungroup() %>%
   group_by(sex, model, variable) %>%
   mutate(avg_maa = mean(maa)) %>%
+  ungroup() %>%
+  group_by(variable) %>%
+  mutate(avg_avg_maa = mean(maa)) %>%
   ungroup()
   
 ```
@@ -78,11 +92,12 @@ Dataframes per model
 plot_comp_model <- function(data, modelname) {
   data_plt <- data %>%
     filter(model == modelname)
-  plt <- ggplot(data=data_plt, aes(x = reorder(variable, avg_maa))) +
+  plt <- ggplot(data=data_plt, aes(x = reorder(variable, avg_avg_maa))) +
       facet_grid(cols = vars(sex)) +
       geom_line(mapping=aes(y = maa, group = country, color = country), size = 1) +
-      geom_point(mapping=aes(y = maa, color = country), size = 2) +
+      geom_point(mapping=aes(y = maa, color = country, shape = country), size = 2) +
       geom_col(mapping=aes(y = avg_maa), alpha = 0.2, position = 'identity') +
+      scale_shape_manual(values=c(18, 15, 8, 17, 16)) +
       coord_flip() +
       ggtitle(paste0('Variable importance, model ', modelname)) +
       xlab('Variable') + ylab('Mean absolute attribution') +

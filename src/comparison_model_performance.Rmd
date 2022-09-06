@@ -45,7 +45,8 @@ data_sizes <- bind_rows(datalist) %>%
          country = case_when(country=='BE' ~ 'Belgium',
                              country=='NL' ~ 'Netherlands',
                              country=='FL' ~ 'Finland',
-                             country=='SA' ~ 'South Africa')) %>%
+                             country=='SA' ~ 'South Africa',
+                             country=='AU' ~ 'Australia')) %>%
   select(country, sex, Dataset, deferral_rate) %>%
   pivot_wider(names_from=Dataset, names_prefix='defrate_', values_from=deferral_rate)
 
@@ -56,7 +57,8 @@ data_aupr <- bind_rows(datalist) %>%
   mutate(country = case_when(country=='BE' ~ 'Belgium',
                              country=='NL' ~ 'Netherlands',
                              country=='FL' ~ 'Finland',
-                             country=='SA' ~ 'South Africa'),
+                             country=='SA' ~ 'South Africa',
+                             country=='AU' ~ 'Australia'),
          country = as.factor(country),
          model = factor(str_to_title(Pretty), 
                            levels=c('Baseline',
@@ -80,7 +82,7 @@ data_aupr %>%
     facet_grid(rows=vars(model), cols=vars(sex), labeller=labeller(model=label_wrap_gen(10),
                                                                    sex=str_to_title)) +
     ggstance::geom_pointrangeh(aes(colour=country, shape=country)) +
-    scale_shape_manual(values=c(15, 8, 17, 16)) +
+    scale_shape_manual(values=c(18, 15, 8, 17, 16)) +
     scale_y_discrete(limits=rev) +
     xlab('Area Under Precision-Recall Curve, adjusted for deferral rate') +
     ylab('') +
@@ -94,7 +96,7 @@ data_aupr %>%
   ggplot(aes(x=AUPR.value.adj, xmin=AUPR.low.adj, xmax=AUPR.high.adj, y=model)) +
     facet_grid(rows=vars(country), cols=vars(sex), labeller=labeller(sex=str_to_title)) +
     ggstance::geom_pointrangeh(aes(colour=country, shape=country)) +
-    scale_shape_manual(values=c(15, 8, 17, 16)) +
+    scale_shape_manual(values=c(18, 15, 8, 17, 16)) +
     scale_y_discrete(limits=rev) +
     xlab('Area Under Precision-Recall Curve, \nadjusted for deferral rate') +
     ylab('') +
@@ -114,14 +116,15 @@ data_aupr %>%
                                                                    sex=str_to_title),
              scales='free_x') +
   geom_point(size=2) +
-  scale_shape_manual(values=c(15, 8, 17, 16)) +
+  scale_shape_manual(values=c(18, 15, 8, 17, 16)) +
   xlab('Deferral rate in validation data') +
   ylab('Area Under Precision-Recall Curve, \nadjusted for deferral rate') +
   theme_bw() +
     theme(legend.position='bottom',
-          strip.text.y.right=element_text(angle=0))
+          strip.text.y.right=element_text(angle=0)) +
+  guides(shape=guide_legend(nrow=2, byrow=TRUE))
 
-ggsave('../plots_for_manuscript/defrate_vs_AUPR.png', width=5, height=5)
+ggsave('../plots_for_manuscript/defrate_vs_AUPR.png', width=5, height=6)
 ```
 
 
