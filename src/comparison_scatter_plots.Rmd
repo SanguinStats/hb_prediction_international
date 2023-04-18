@@ -37,9 +37,9 @@ generate_my_breaks <- function(step) {
 ```{r}
 df <- bind_rows(Finland=fi_predictions, Belgium=be_predictions, .id="country")
 df <- df %>% mutate(model = factor(model, levels=c("lmm", "dlmm")))
-helper <- function(df, sex) {
-  df <- df %>% filter(sex == "male")
-  threshold <- if_else(sex == "male", 135, 125)
+helper <- function(df, sex_p) {
+  df <- df %>% filter(sex == sex_p)
+  threshold <- if_else(sex_p == "male", 135, 125)
   xymin <- min(min(df$predicted_value), min(df$original_value))
   xymax <- max(max(df$predicted_value), max(df$original_value))
   
@@ -57,12 +57,13 @@ helper <- function(df, sex) {
     geom_hline(yintercept = threshold, linetype = "dashed") +
     theme(legend.position = "bottom") +
     facet_grid(country  ~ model) +
-    labs(title=sprintf("Observed vs predicted Hb-values (%s)", sex))
+    labs(title=sprintf("Observed vs predicted Hb-values (%s)", sex_p))
 }
 male_scatter_plot <- helper(df, "male")
 male_scatter_plot
 female_scatter_plot <- helper(df, "female")
 female_scatter_plot
 ggsave("../results/male-scatter-plot-comparison.png", male_scatter_plot)
+ggsave("../results/female-scatter-plot-comparison.png", female_scatter_plot)
 ```
 
