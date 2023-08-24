@@ -1,17 +1,25 @@
 ---
-title: "AUROC values in initial and final mode"
+title: "Stability of confidence intervals"
 author: "Jarkko Toivonen"
 date: "`r Sys.Date()`"
 output: github_document
 ---
 
-Are results reliable when there so big changes between different runs? At least if the seed is fixed then the results stay the
-same. Here I compare the results from "initial" and "final" modes.
+Are results reliable when there are so big changes in the confidence intervals between different runs? 
+At least if the seed is fixed then the results stay the
+same. 
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
+result_path <- "../results/"
+fig_path <- result_path
 ```
+
+## Check existing results (AUROC)
+
+Here I plot the 95% confidence intervals of the AUROC values.
+Initial versus final mode are compared. The seed is given as a parameter to the container, so the 10k sample is different for each seed.
 
 ```{r}
 # Some seed parameters and the AUROC values they gave
@@ -25,21 +33,21 @@ seeds <- tibble::tribble(
 
 ```
 
-
+### Results from 10k sample
 ```{r Results from 10k sample}
 old_filename <- "/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-02-09-all-10k/summary.csv"    # seed 123
 new_filename <- "/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-03-31-all-final/summary.csv"  # seed 123
 new2_filename <- "/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-03-31-all-final2/summary.csv"  # seed 6532
-old <- read_csv(old_filename)
-new <- read_csv(new_filename)
-new2 <- read_csv(new2_filename)
+old_10k <- read_csv(old_filename, show_col_types = FALSE)
+new_10k <- read_csv(new_filename, show_col_types = FALSE)
+new2_10k <- read_csv(new2_filename, show_col_types = FALSE)
 ```
 
 ```{r Results from full data}
-tmp1 <- read_csv("/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-02-11-rf-svm-bl-full/summary.csv")
-tmp2 <- read_csv("/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-02-14-lmm-full/summary.csv")
+tmp1 <- read_csv("/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-02-11-rf-svm-bl-full/summary.csv", show_col_types = FALSE)
+tmp2 <- read_csv("/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-02-14-lmm-full/summary.csv", show_col_types = FALSE)
 old_full <- bind_rows(tmp1, tmp2)
-new_full <- read_csv("/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-04-01-all-full-final/summary.csv")
+new_full <- read_csv("/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-04-01-all-full-final/summary.csv", show_col_types = FALSE)
 ```
 
 ```{r}
@@ -55,26 +63,136 @@ myplot <- function(old, new, label1="initial", label2="final") {
 ```
 
 ```{r}
-myplot(old, new) + labs(title="Seeds initial = 123, final = 123")
+myplot(old_10k, new_10k) + labs(title="Seeds initial = 123, final = 123")
 ```
 
 Try with another seed.
 
 ```{r}
 # To save time, I didn't compute the linear models for this seed.
-myplot(old, new2) + labs(title="Seeds initial = 123, final = 6532")
+myplot(old_10k, new2_10k) + labs(title="Seeds initial = 123, final = 6532")
 ```
 
 Compare final result for two seeds.
 
 ```{r}
-myplot(new, new2, "final1", "final2") + labs(title="Final seed1 = 123, final seed2 = 6532")
+myplot(new_10k, new2_10k, "final1", "final2") + labs(title="Final seed1 = 123, final seed2 = 6532")
 ```
 
 
-Results from full data.
+### Results from full data.
 
 ```{r}
 myplot(old_full, new_full)
 ```
+
+
+## Recompute the confidence intervals using different seeds.
+
+Here the result of the random forest is the same, only the bootstrapping is repeated using different seeds.
+The point is to check whether the bootstrapped confidence intervals are reliable.
+
+```{r}
+#source("~/FRCBS/Hb_predictor_container/src/common.R")
+source("~/FRCBS/Hb_predictor_container/src/validate_stan_fit.R", chdir = TRUE)
+```
+
+```{r}
+filename <- "/home/toivoja/FRCBS/Hb_predictor_container/results/jarkko-2022-03-31-all-final/prediction.csv"  # seed 123
+
+df <- read_csv(filename)
+df %>% count(id)
+```
+
+The size of the test set is 2000. Let's concentrate on the females in RF model.
+
+```{r}
+df <- df %>% filter(id=="rf-female")
+nrow(df)
+```
+
+```{r}
+get_aupr <- function(df, indices=1:nrow(df)) {
+  df2 <- df[indices,]
+  aupr <- PRROC::pr.curve(scores.class0=df2$score, weights.class0=df2$original_label)$auc.davis.goadrich
+  return(aupr)
+}
+
+get_aupr_ci <- function(df, method="norm", boot.n=NULL, seed=NULL) {
+  df <- df %>% select(original_label, score)
+  if (is.null(boot.n)) {
+    boot.n <- nrow(df)
+  }
+  
+  if (!is.null(seed)) set.seed(seed)
+  #b <- boot(df, statistic = get_aupr, R=boot.n, sim="ordinary", stype="i", strata=df$original_label, parallel="multicore")#, ncpus=1)
+  b <- boot(df, statistic = get_aupr, R=boot.n, sim="ordinary", stype="i", strata=df$original_label, parallel="no")#, ncpus=1)
+  ret <- tryCatch(
+    error = function(cnd) return(-1),
+    {
+      result <- boot.ci(b, conf=0.95, type=method)
+      var <- recode(method, "norm"="normal", "perc"="percent", "stud"="student")  # The name of the output field is stupidly sometimes not the same as the parameter name
+      ci <- if (method=="norm") result[[var]][2:3] else result[[var]][4:5]
+      NULL
+    })
+  if (!is.null(ret) && ret == -1) {
+    ci <- c(NA, NA)
+  }
+  names(ci) <- c("low", "high")
+  ci
+}
+```
+
+```{r, eval=FALSE}
+# Just testing
+# pr_plot <- create_precision_recall_new(df$original_label, df$score)#, boot.n=boot.n)
+ci <- get_aupr_ci(df, method="norm", boot.n=NULL, seed=123) 
+```
+
+Note about studentized CIs:
+Note also: "The standard error of bootstrap statistic can be estimated by second-stage resampling."
+source: https://www.geeksforgeeks.org/bootstrap-confidence-interval-with-r-programming/
+
+```{r}
+aupr <- get_aupr(df)
+seeds <- sample.int(n=1e8, size=10)
+# Let's not run the studentized CIs, since that would require a variance estimate for the statistic (AUPR)
+# https://stats.stackexchange.com/questions/156050/why-am-i-getting-these-warnings-when-running-a-bootstrap-test-in-r
+methods <- c("norm", "basic", "perc", "bca")
+cis <- expand_grid(seed=seeds, boot.n=c(100, 1000, 2000), method=methods, aupr=aupr)
+cis <- cis %>% 
+  rowwise() %>% 
+  mutate(ci = list(get_aupr_ci(df, boot.n=boot.n, seed=seed, method=method)) ) %>%
+  ungroup() %>%
+  unnest_wider(ci)
+write_tsv(cis, file.path(result_path, "stability_of_aupr_cis.tsv"))
+```
+
+```{r}
+g <- cis %>% ggplot(aes(x=aupr, xmin=low, xmax=high, y=factor(seed))) +
+  geom_pointrange() +
+  #lims(x=c(0, 0.25)) +
+  coord_cartesian(xlim=c(0, 0.25)) +
+  labs(y="Seed", title="95% confidence intervals") +
+  facet_grid(method ~ boot.n)
+g 
+ggsave(file.path(fig_path, "stability_of_aupr_cis.png"))
+```
+
+Note the the bca method requires the number of iterations to be at least the size of dataset.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
